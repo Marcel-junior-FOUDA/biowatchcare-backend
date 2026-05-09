@@ -7,6 +7,47 @@ import { AppError } from '../middleware/error';
 const router = Router();
 router.use(authenticate, requireRole('pharmacist', 'super_admin'));
 
+// ── GET /pharmacist/me ────────────────────────────────────────────────────────
+
+router.get('/me', async (req, res) => {
+  const userId = req.user!.sub;
+  const me = await queryOne<{
+    id: string; email: string; display_name: string | null;
+    specialty: string | null; license_number: string | null; phone: string | null;
+    hospital_id: string | null; hospital_name: string | null;
+  }>(
+    `SELECT u.id, u.email, u.display_name, u.specialty, u.license_number, u.phone,
+            u.hospital_id, h.name AS hospital_name
+     FROM users u LEFT JOIN hospitals h ON h.id = u.hospital_id
+     WHERE u.id = $1`,
+    [userId],
+  );
+  if (!me) throw new AppError(404, 'Utilisateur introuvable');
+  res.json(me);
+});
+
+// ── GET /pharmacist/stats ─────────────────────────────────────────────────────
+
+router.get('/stats', async (req, res) => {
+  const pharmacistId = req.user!.sub;
+  const [dispenses, patients] = await Promise.all([
+    queryOne<{ count: string }>(
+      'SELECT COUNT(*) FROM dispenses WHERE pharmacist_id = $1',
+      [pharmacistId],
+    ),
+    queryOne<{ count: string }>(
+      `SELECT COUNT(DISTINCT rx.patient_id) FROM dispenses d
+       JOIN prescriptions rx ON rx.id = d.prescription_id
+       WHERE d.pharmacist_id = $1`,
+      [pharmacistId],
+    ),
+  ]);
+  res.json({
+    dispenses: parseInt(dispenses?.count ?? '0'),
+    patients: parseInt(patients?.count ?? '0'),
+  });
+});
+
 const verifySchema = z.object({
   token_hash: z.string().min(32),
 });
