@@ -14,10 +14,10 @@ router.use(authenticate, requireRole('hospital_admin', 'super_admin'));
 router.get('/staff', async (req, res) => {
   const hospitalId = req.user!.sub;
   const rows = await query(
-    `SELECT u.id, u.email, u.role, u.display_name, u.created_at
+    `SELECT u.id, u.email, u.role, u.display_name, u.specialty, u.license_number, u.phone, u.created_at
      FROM users u
      WHERE u.hospital_id = (SELECT hospital_id FROM users WHERE id = $1)
-       AND u.role IN ('doctor', 'pharmacist')
+       AND u.role IN ('doctor', 'pharmacist', 'insurer')
      ORDER BY u.display_name`,
     [hospitalId],
   );
@@ -28,9 +28,12 @@ router.get('/staff', async (req, res) => {
 
 const createStaffSchema = z.object({
   email: z.string().email(),
-  role: z.enum(['doctor', 'pharmacist']),
+  role: z.enum(['doctor', 'pharmacist', 'insurer']),
   display_name: z.string().min(2),
   temp_password: z.string().min(8),
+  specialty: z.string().optional(),
+  license_number: z.string().optional(),
+  phone: z.string().optional(),
 });
 
 router.post('/staff', async (req, res) => {
@@ -53,10 +56,20 @@ router.post('/staff', async (req, res) => {
   const hash = await bcrypt.hash(body.temp_password, 12);
 
   const [user] = await query<{ id: string }>(
-    `INSERT INTO users (email, password_hash, role, display_name, hospital_id, is_first_login, solana_public_key)
-     VALUES ($1, $2, $3, $4, $5, true, '')
+    `INSERT INTO users
+       (email, password_hash, role, display_name, specialty, license_number, phone, hospital_id, is_first_login, solana_public_key)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, '')
      RETURNING id`,
-    [body.email.toLowerCase(), hash, body.role, body.display_name, admin.hospital_id],
+    [
+      body.email.toLowerCase(),
+      hash,
+      body.role,
+      body.display_name,
+      body.specialty ?? null,
+      body.license_number ?? null,
+      body.phone ?? null,
+      admin.hospital_id,
+    ],
   );
 
   res.status(201).json({ id: user!.id, email: body.email, role: body.role, is_first_login: true });
@@ -82,6 +95,62 @@ router.get('/me', async (req, res) => {
   );
   if (!me) throw new AppError(404, 'Utilisateur introuvable');
   res.json(me);
+});
+
+// ── GET /hospital/patients ────────────────────────────────────────────────────
+
+router.get('/patients', async (req, res) => {
+  const userId = req.user!.sub;
+  const rows = await query(
+    `SELECT p.id, p.full_name, p.date_of_birth, p.phone, p.email, p.solana_public_key
+     FROM patients p
+     JOIN hospital_patients hp ON hp.patient_id = p.id
+     WHERE hp.hospital_id = (SELECT hospital_id FROM users WHERE id = $1)
+     ORDER BY p.full_name`,
+    [userId],
+  );
+  res.json(rows);
+});
+
+// ── POST /hospital/patients ───────────────────────────────────────────────────
+
+const createPatientHospitalSchema = z.object({
+  full_name: z.string().min(2),
+  date_of_birth: z.string(),
+  phone: z.string(),
+  email: z.string().email(),
+});
+
+router.post('/patients', async (req, res) => {
+  const userId = req.user!.sub;
+  const body = createPatientHospitalSchema.parse(req.body);
+
+  const admin = await queryOne<{ hospital_id: string }>(
+    'SELECT hospital_id FROM users WHERE id = $1',
+    [userId],
+  );
+  if (!admin?.hospital_id) throw new AppError(400, 'Admin sans hôpital associé');
+
+  const existing = await queryOne<{ id: string }>(
+    'SELECT id FROM patients WHERE email = $1',
+    [body.email.toLowerCase()],
+  );
+  if (existing) throw new AppError(409, 'Un patient avec cet email existe déjà');
+
+  const [patient] = await query<{ id: string }>(
+    `INSERT INTO patients (full_name, date_of_birth, phone, email, solana_public_key)
+     VALUES ($1, $2, $3, $4, '')
+     RETURNING id`,
+    [body.full_name, body.date_of_birth, body.phone, body.email.toLowerCase()],
+  );
+
+  await query(
+    `INSERT INTO hospital_patients (hospital_id, patient_id)
+     VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [admin.hospital_id, patient!.id],
+  );
+
+  res.status(201).json({ id: patient!.id, ...body });
 });
 
 // ── POST /hospital/invoices ───────────────────────────────────────────────────
