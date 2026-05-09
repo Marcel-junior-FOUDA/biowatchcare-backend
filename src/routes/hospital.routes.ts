@@ -101,11 +101,26 @@ router.get('/me', async (req, res) => {
 
 router.get('/patients', async (req, res) => {
   const userId = req.user!.sub;
+  // Patients de l'hôpital : créés directement par l'admin,
+  // ou liés via un médecin / assureur appartenant au même hôpital
   const rows = await query(
-    `SELECT p.id, p.full_name, p.date_of_birth, p.phone, p.email, p.solana_public_key
+    `SELECT DISTINCT p.id, p.full_name, p.date_of_birth, p.phone, p.email, p.solana_public_key
      FROM patients p
-     JOIN hospital_patients hp ON hp.patient_id = p.id
-     WHERE hp.hospital_id = (SELECT hospital_id FROM users WHERE id = $1)
+     WHERE
+       p.id IN (
+         SELECT hp.patient_id FROM hospital_patients hp
+         WHERE hp.hospital_id = (SELECT hospital_id FROM users WHERE id = $1)
+       )
+       OR p.id IN (
+         SELECT dp.patient_id FROM doctor_patients dp
+         JOIN users u ON u.id = dp.doctor_id
+         WHERE u.hospital_id = (SELECT hospital_id FROM users WHERE id = $1)
+       )
+       OR p.id IN (
+         SELECT ip.patient_id FROM insurer_patients ip
+         JOIN users u ON u.id = ip.insurer_id
+         WHERE u.hospital_id = (SELECT hospital_id FROM users WHERE id = $1)
+       )
      ORDER BY p.full_name`,
     [userId],
   );
