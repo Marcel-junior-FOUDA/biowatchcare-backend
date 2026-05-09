@@ -62,6 +62,28 @@ router.post('/staff', async (req, res) => {
   res.status(201).json({ id: user!.id, email: body.email, role: body.role, is_first_login: true });
 });
 
+// ── GET /hospital/me ─────────────────────────────────────────────────────────
+
+router.get('/me', async (req, res) => {
+  const userId = req.user!.sub;
+  const me = await queryOne<{
+    id: string;
+    email: string;
+    display_name: string;
+    role: string;
+    hospital_id: string;
+    hospital_name: string;
+  }>(
+    `SELECT u.id, u.email, u.display_name, u.role, u.hospital_id, h.name AS hospital_name
+     FROM users u
+     LEFT JOIN hospitals h ON h.id = u.hospital_id
+     WHERE u.id = $1`,
+    [userId],
+  );
+  if (!me) throw new AppError(404, 'Utilisateur introuvable');
+  res.json(me);
+});
+
 // ── POST /hospital/invoices ───────────────────────────────────────────────────
 
 const createInvoiceSchema = z.object({

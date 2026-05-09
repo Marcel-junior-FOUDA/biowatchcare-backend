@@ -12,6 +12,7 @@ import insurerRoutes from './routes/insurer.routes';
 import doctorRoutes from './routes/doctor.routes';
 import pharmacistRoutes from './routes/pharmacist.routes';
 import hospitalRoutes from './routes/hospital.routes';
+import superAdminRoutes from './routes/super_admin.routes';
 
 const app = express();
 
@@ -38,6 +39,7 @@ app.use('/insurer', insurerRoutes);
 app.use('/doctor', doctorRoutes);
 app.use('/pharmacist', pharmacistRoutes);
 app.use('/hospital', hospitalRoutes);
+app.use('/super-admin', superAdminRoutes);
 
 // ── Erreurs ───────────────────────────────────────────────────────────────────
 app.use(errorHandler);

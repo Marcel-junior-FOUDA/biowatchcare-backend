@@ -3,7 +3,6 @@ import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { query, queryOne } from '../db';
 import { makeTokenPair, verifyRefreshToken } from '../services/token.service';
-import { isEntityApproved } from '../services/solana.service';
 import { AppError } from '../middleware/error';
 import { authenticate } from '../middleware/auth';
 import type { JwtPayload } from '../middleware/auth';
@@ -16,7 +15,7 @@ const router = Router();
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(6),
-  solana_public_key: z.string().min(32),
+  solana_public_key: z.string().optional().default(''),
 });
 
 const changePasswordSchema = z.object({
