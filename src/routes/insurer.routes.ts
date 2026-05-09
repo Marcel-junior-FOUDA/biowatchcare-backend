@@ -9,6 +9,30 @@ import { config } from '../config';
 const router = Router();
 router.use(authenticate, requireRole('insurer', 'super_admin'));
 
+// ── GET /insurer/me ──────────────────────────────────────────────────────────
+
+router.get('/me', async (req, res) => {
+  const userId = req.user!.sub;
+  const me = await queryOne<{
+    id: string;
+    email: string;
+    display_name: string | null;
+    specialty: string | null;
+    license_number: string | null;
+    phone: string | null;
+    hospital_id: string | null;
+    hospital_name: string | null;
+  }>(
+    `SELECT u.id, u.email, u.display_name, u.specialty, u.license_number, u.phone,
+            u.hospital_id, h.name AS hospital_name
+     FROM users u LEFT JOIN hospitals h ON h.id = u.hospital_id
+     WHERE u.id = $1`,
+    [userId],
+  );
+  if (!me) throw new AppError(404, 'Utilisateur introuvable');
+  res.json(me);
+});
+
 // ── GET /insurer/patients ────────────────────────────────────────────────────
 
 router.get('/patients', async (req, res) => {
