@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import { query, queryOne } from '../db';
 import { authenticate, requireRole } from '../middleware/auth';
@@ -8,6 +7,45 @@ import { AppError } from '../middleware/error';
 
 const router = Router();
 router.use(authenticate, requireRole('doctor', 'super_admin'));
+
+// ── GET /doctor/me ────────────────────────────────────────────────────────────
+
+router.get('/me', async (req, res) => {
+  const userId = req.user!.sub;
+  const me = await queryOne<{
+    id: string; email: string; display_name: string | null;
+    specialty: string | null; license_number: string | null; phone: string | null;
+    hospital_id: string | null; hospital_name: string | null;
+  }>(
+    `SELECT u.id, u.email, u.display_name, u.specialty, u.license_number, u.phone,
+            u.hospital_id, h.name AS hospital_name
+     FROM users u LEFT JOIN hospitals h ON h.id = u.hospital_id
+     WHERE u.id = $1`,
+    [userId],
+  );
+  if (!me) throw new AppError(404, 'Utilisateur introuvable');
+  res.json(me);
+});
+
+// ── GET /doctor/stats ─────────────────────────────────────────────────────────
+
+router.get('/stats', async (req, res) => {
+  const doctorId = req.user!.sub;
+  const [patients, prescriptions] = await Promise.all([
+    queryOne<{ count: string }>(
+      'SELECT COUNT(*) FROM doctor_patients WHERE doctor_id = $1',
+      [doctorId],
+    ),
+    queryOne<{ count: string }>(
+      "SELECT COUNT(*) FROM prescriptions WHERE doctor_id = $1 AND status = 'active'",
+      [doctorId],
+    ),
+  ]);
+  res.json({
+    patients: parseInt(patients?.count ?? '0'),
+    active_prescriptions: parseInt(prescriptions?.count ?? '0'),
+  });
+});
 
 // ── GET /doctor/patients ──────────────────────────────────────────────────────
 
