@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { query, queryOne } from '../db';
 import { authenticate, requireRole } from '../middleware/auth';
 import { AppError } from '../middleware/error';
+import { logger } from '../logger';
 
 const router = Router();
 router.use(authenticate, requireRole('doctor', 'super_admin'));
@@ -154,6 +155,291 @@ router.delete('/prescriptions/:rxId', async (req, res) => {
     [rxId],
   );
   res.json({ message: 'Ordonnance annulée' });
+});
+
+// ── GET /doctor/patients/search?code=BWC-XXXX ─────────────────────────────────
+
+router.get('/patients/search', async (req, res) => {
+  const { code } = req.query;
+  if (!code || typeof code !== 'string') throw new AppError(400, 'code requis');
+
+  const patient = await queryOne<{
+    id: string;
+    full_name: string;
+    date_of_birth: string | null;
+    phone: string | null;
+    email: string | null;
+    patient_code: string;
+  }>(
+    `SELECT id, full_name, date_of_birth, phone, email, patient_code
+     FROM patients
+     WHERE UPPER(patient_code) = UPPER($1)`,
+    [code.trim()],
+  );
+
+  if (!patient) throw new AppError(404, 'Aucun patient trouvé avec ce code');
+  res.json(patient);
+});
+
+// ── GET /doctor/hospital-staff ────────────────────────────────────────────────
+// Retourne les pharmaciens et assureurs du même hôpital
+
+router.get('/hospital-staff', async (req, res) => {
+  const doctorId = req.user!.sub;
+  const rows = await query<{
+    id: string;
+    display_name: string | null;
+    role: string;
+    email: string;
+    specialty: string | null;
+    license_number: string | null;
+  }>(
+    `SELECT u.id, u.display_name, u.role, u.email, u.specialty, u.license_number
+     FROM users u
+     WHERE u.hospital_id = (SELECT hospital_id FROM users WHERE id = $1)
+       AND u.role IN ('pharmacist', 'insurer')
+     ORDER BY u.role, u.display_name`,
+    [doctorId],
+  );
+  res.json(rows);
+});
+
+// ── POST /doctor/consultations ────────────────────────────────────────────────
+
+const createConsultationSchema = z.object({
+  patient_id: z.string().uuid(),
+  pharmacist_id: z.string().uuid().optional(),
+  insurer_id: z.string().uuid().optional(),
+  motif: z.string().min(1),
+  observations: z.string().optional(),
+  conclusion: z.string().optional(),
+  medications: z.array(z.object({
+    name: z.string().min(1),
+    dosage: z.string().optional(),
+    frequency: z.string().optional(),
+    duration: z.string().optional(),
+    instructions: z.string().optional(),
+  })).default([]),
+});
+
+router.post('/consultations', async (req, res) => {
+  const doctorId = req.user!.sub;
+  const body = createConsultationSchema.parse(req.body);
+
+  // Lier le patient au médecin si pas encore fait
+  await query(
+    `INSERT INTO doctor_patients (doctor_id, patient_id)
+     VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [doctorId, body.patient_id],
+  );
+
+  const [consultation] = await query<{ id: string }>(
+    `INSERT INTO consultations
+       (patient_id, doctor_id, pharmacist_id, insurer_id, motif, observations, conclusion, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'draft')
+     RETURNING id`,
+    [
+      body.patient_id,
+      doctorId,
+      body.pharmacist_id ?? null,
+      body.insurer_id ?? null,
+      body.motif,
+      body.observations ?? null,
+      body.conclusion ?? null,
+    ],
+  );
+
+  // Créer l'ordonnance associée (même si medications vide, on la crée)
+  const medicationsJson = JSON.stringify(body.medications);
+  const pointerHash = crypto
+    .createHash('sha256')
+    .update(`${consultation!.id}:${medicationsJson}:${Date.now()}`)
+    .digest('hex');
+
+  const rxHash = crypto
+    .createHash('sha256')
+    .update(`${body.patient_id}:${pointerHash}:${Date.now()}`)
+    .digest('hex');
+
+  const [rx] = await query<{ id: string }>(
+    `INSERT INTO prescriptions (patient_id, doctor_id, consultation_id, rx_hash, pointer_hash, medications_json, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'draft')
+     RETURNING id`,
+    [body.patient_id, doctorId, consultation!.id, rxHash, pointerHash, medicationsJson],
+  );
+
+  res.status(201).json({
+    consultation_id: consultation!.id,
+    prescription_id: rx!.id,
+    rx_hash: rxHash,
+    status: 'draft',
+  });
+});
+
+// ── POST /doctor/consultations/:id/sign ───────────────────────────────────────
+
+router.post('/consultations/:id/sign', async (req, res) => {
+  const doctorId = req.user!.sub;
+  const { id } = req.params;
+
+  const consultation = await queryOne<{
+    id: string;
+    status: string;
+    doctor_id: string;
+    patient_id: string;
+    pharmacist_id: string | null;
+    insurer_id: string | null;
+  }>(
+    'SELECT id, status, doctor_id, patient_id, pharmacist_id, insurer_id FROM consultations WHERE id = $1',
+    [id],
+  );
+  if (!consultation) throw new AppError(404, 'Consultation introuvable');
+  if (consultation.doctor_id !== doctorId) throw new AppError(403, 'Accès refusé');
+  if (consultation.status !== 'draft') throw new AppError(409, 'Consultation déjà signée');
+
+  // Signer la consultation
+  await query(
+    `UPDATE consultations SET status = 'signed', signed_at = NOW(), updated_at = NOW()
+     WHERE id = $1`,
+    [id],
+  );
+
+  // Activer l'ordonnance
+  await query(
+    `UPDATE prescriptions SET status = 'active', updated_at = NOW()
+     WHERE consultation_id = $1`,
+    [id],
+  );
+
+  // Récupérer l'ordonnance pour générer le QR
+  const rx = await queryOne<{ id: string }>(
+    'SELECT id FROM prescriptions WHERE consultation_id = $1',
+    [id],
+  );
+
+  let qrToken: string | null = null;
+  if (rx) {
+    qrToken = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
+    await query(
+      `INSERT INTO qr_tokens (prescription_id, token_hash, expires_at, used)
+       VALUES ($1, $2, $3, false)`,
+      [rx.id, qrToken, expiresAt],
+    );
+  }
+
+  // Notification au patient
+  const patientUser = await queryOne<{ id: string }>(
+    'SELECT id FROM users WHERE patient_id = $1',
+    [consultation.patient_id],
+  );
+  if (patientUser) {
+    const doctor = await queryOne<{ display_name: string | null }>(
+      'SELECT display_name FROM users WHERE id = $1',
+      [doctorId],
+    );
+    await query(
+      `INSERT INTO notifications (user_id, type, title, body, data)
+       VALUES ($1, 'consultation_signed', 'Consultation signée',
+               $2, $3)`,
+      [
+        patientUser.id,
+        `Dr. ${doctor?.display_name ?? 'Votre médecin'} a signé votre consultation. Votre ordonnance est disponible.`,
+        JSON.stringify({ consultation_id: id }),
+      ],
+    );
+  }
+
+  // Notification au pharmacien si sélectionné
+  if (consultation.pharmacist_id) {
+    await query(
+      `INSERT INTO notifications (user_id, type, title, body, data)
+       VALUES ($1, 'new_prescription', 'Nouvelle ordonnance',
+               'Une nouvelle ordonnance vous est attribuée.', $2)`,
+      [
+        consultation.pharmacist_id,
+        JSON.stringify({ consultation_id: id, prescription_id: rx?.id }),
+      ],
+    );
+  }
+
+  logger.info(`Consultation ${id} signée par médecin ${doctorId}`);
+
+  res.json({
+    message: 'Consultation signée',
+    qr_token: qrToken,
+    prescription_id: rx?.id,
+  });
+});
+
+// ── GET /doctor/consultations ─────────────────────────────────────────────────
+
+router.get('/consultations', async (req, res) => {
+  const doctorId = req.user!.sub;
+
+  // Check whether migration 002 has been applied
+  const tableCheck = await query<{ table_name: string }>(
+    `SELECT table_name FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = 'consultations'`,
+    [],
+  );
+  if (tableCheck.length === 0) {
+    res.json([]);
+    return;
+  }
+
+  const colCheck = await query<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_name = 'patients' AND column_name = 'patient_code'`,
+    [],
+  );
+  const hasPatientCode = colCheck.length > 0;
+
+  const colCheckRx = await query<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_name = 'prescriptions' AND column_name = 'medications_json'`,
+    [],
+  );
+  const hasMedicationsJson = colCheckRx.length > 0;
+
+  const patientCodeExpr = hasPatientCode    ? 'p.patient_code'      : 'NULL::text';
+  const medicationsExpr = hasMedicationsJson ? 'rx.medications_json' : 'NULL::jsonb';
+
+  const rows = await query(
+    `SELECT c.id, c.motif, c.status, c.signed_at, c.created_at,
+            p.full_name AS patient_name, ${patientCodeExpr} AS patient_code,
+            rx.id AS prescription_id, ${medicationsExpr} AS medications_json
+     FROM consultations c
+     JOIN patients p ON p.id = c.patient_id
+     LEFT JOIN prescriptions rx ON ${hasMedicationsJson ? 'rx.consultation_id = c.id' : 'false'}
+     WHERE c.doctor_id = $1
+       AND c.status IN ('signed', 'dispensed')
+     ORDER BY c.created_at DESC`,
+    [doctorId],
+  );
+  res.json(rows);
+});
+
+// ── GET /doctor/notifications ─────────────────────────────────────────────────
+
+router.get('/notifications', async (req, res) => {
+  const userId = req.user!.sub;
+  const rows = await query(
+    `SELECT id, type, title, body, data, read, created_at
+     FROM notifications WHERE user_id = $1
+     ORDER BY created_at DESC LIMIT 50`,
+    [userId],
+  );
+  res.json(rows);
+});
+
+router.patch('/notifications/:id/read', async (req, res) => {
+  const userId = req.user!.sub;
+  await query(
+    'UPDATE notifications SET read = true WHERE id = $1 AND user_id = $2',
+    [req.params['id'], userId],
+  );
+  res.json({ ok: true });
 });
 
 export default router;

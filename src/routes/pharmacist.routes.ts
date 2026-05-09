@@ -111,6 +111,31 @@ router.post('/qr/dispense', async (req, res) => {
     [qr.prescription_id, pharmacistId],
   );
 
+  await query(
+    `UPDATE prescriptions SET status = 'dispensed', updated_at = NOW() WHERE id = $1`,
+    [qr.prescription_id],
+  );
+
+  // Notifier le patient
+  const rx = await queryOne<{ patient_id: string }>(
+    'SELECT patient_id FROM prescriptions WHERE id = $1',
+    [qr.prescription_id],
+  );
+  if (rx) {
+    const patientUser = await queryOne<{ id: string }>(
+      'SELECT id FROM users WHERE patient_id = $1',
+      [rx.patient_id],
+    );
+    if (patientUser) {
+      await query(
+        `INSERT INTO notifications (user_id, type, title, body, data)
+         VALUES ($1, 'prescription_dispensed', 'Médicaments délivrés',
+                 'Vos médicaments ont été délivrés par la pharmacie.', $2)`,
+        [patientUser.id, JSON.stringify({ prescription_id: qr.prescription_id })],
+      );
+    }
+  }
+
   res.json({ message: 'Médicament dispensé avec succès', prescription_id: qr.prescription_id });
 });
 
@@ -129,6 +154,58 @@ router.get('/dispenses', async (req, res) => {
     [pharmacistId],
   );
   res.json(rows);
+});
+
+// ── GET /pharmacist/prescriptions/:id ────────────────────────────────────────
+
+router.get('/prescriptions/:id', async (req, res) => {
+  const rx = await queryOne<{
+    id: string;
+    patient_id: string;
+    rx_hash: string;
+    medications_json: unknown;
+    status: string;
+    created_at: string;
+    patient_name: string;
+    doctor_name: string | null;
+    motif: string | null;
+    conclusion: string | null;
+  }>(
+    `SELECT rx.id, rx.patient_id, rx.rx_hash, rx.medications_json, rx.status, rx.created_at,
+            p.full_name AS patient_name,
+            u.display_name AS doctor_name,
+            c.motif, c.conclusion
+     FROM prescriptions rx
+     JOIN patients p ON p.id = rx.patient_id
+     JOIN users u ON u.id = rx.doctor_id
+     LEFT JOIN consultations c ON c.id = rx.consultation_id
+     WHERE rx.id = $1`,
+    [req.params['id']],
+  );
+  if (!rx) throw new AppError(404, 'Ordonnance introuvable');
+  res.json(rx);
+});
+
+// ── GET /pharmacist/notifications ─────────────────────────────────────────────
+
+router.get('/notifications', async (req, res) => {
+  const userId = req.user!.sub;
+  const rows = await query(
+    `SELECT id, type, title, body, data, read, created_at
+     FROM notifications WHERE user_id = $1
+     ORDER BY created_at DESC LIMIT 50`,
+    [userId],
+  );
+  res.json(rows);
+});
+
+router.patch('/notifications/:id/read', async (req, res) => {
+  const userId = req.user!.sub;
+  await query(
+    'UPDATE notifications SET read = true WHERE id = $1 AND user_id = $2',
+    [req.params['id'], userId],
+  );
+  res.json({ ok: true });
 });
 
 export default router;

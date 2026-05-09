@@ -14,7 +14,7 @@ const router = Router();
 
 const loginSchema = z.object({
   email: z.string().email(),
-  password: z.string().min(6),
+  password: z.string().min(1),
   solana_public_key: z.string().optional().default(''),
 });
 

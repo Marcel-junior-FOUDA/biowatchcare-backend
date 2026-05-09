@@ -16,7 +16,7 @@ export const config = {
 
   jwt: {
     secret: required('JWT_SECRET'),
-    expiresIn: process.env['JWT_EXPIRES_IN'] ?? '15m',
+    expiresIn: process.env['JWT_EXPIRES_IN'] ?? '4h',
     refreshSecret: required('JWT_REFRESH_SECRET'),
     refreshExpiresIn: process.env['JWT_REFRESH_EXPIRES_IN'] ?? '7d',
   },

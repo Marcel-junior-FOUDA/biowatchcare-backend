@@ -65,6 +65,7 @@ const createPatientSchema = z.object({
   date_of_birth: z.string(),
   phone: z.string(),
   email: z.string().email(),
+  temp_password: z.string().min(8),
   contract_type: z.enum(['Individuel', 'Familial', 'Entreprise']),
 });
 
@@ -72,17 +73,54 @@ router.post('/patients', async (req, res) => {
   const insurerId = req.user!.sub;
   const body = createPatientSchema.parse(req.body);
 
-  const existing = await queryOne<{ id: string }>(
-    'SELECT id FROM patients WHERE email = $1',
+  const existingUser = await queryOne<{ id: string }>(
+    'SELECT id FROM users WHERE email = $1',
     [body.email.toLowerCase()],
   );
-  if (existing) throw new AppError(409, 'Un patient avec cet email existe déjà');
+  if (existingUser) throw new AppError(409, 'Un compte avec cet email existe déjà');
 
-  const [patient] = await query<{ id: string; full_name: string; solana_public_key: string }>(
-    `INSERT INTO patients (full_name, date_of_birth, phone, email, solana_public_key)
-     VALUES ($1, $2, $3, $4, '')
-     RETURNING id, full_name, solana_public_key`,
-    [body.full_name, body.date_of_birth, body.phone, body.email.toLowerCase()],
+  const bcrypt = await import('bcryptjs');
+  const hash = await bcrypt.hash(body.temp_password, 12);
+
+  // Récupérer hospital_id de l'assureur si disponible
+  const insurer = await queryOne<{ hospital_id: string | null }>(
+    'SELECT hospital_id FROM users WHERE id = $1',
+    [insurerId],
+  );
+
+  // Créer le compte utilisateur patient
+  const [user] = await query<{ id: string }>(
+    `INSERT INTO users
+       (email, password_hash, role, display_name, phone, hospital_id, is_first_login, solana_public_key)
+     VALUES ($1, $2, 'patient', $3, $4, $5, true, '')
+     RETURNING id`,
+    [body.email.toLowerCase(), hash, body.full_name, body.phone, insurer?.hospital_id ?? null],
+  );
+
+  // Générer un code patient unique BWC-XXXX
+  let patientCode = '';
+  let codeExists = true;
+  while (codeExists) {
+    patientCode = 'BWC-' + String(Math.floor(Math.random() * 10000)).padStart(4, '0');
+    const existing = await queryOne<{ id: string }>(
+      'SELECT id FROM patients WHERE patient_code = $1',
+      [patientCode],
+    );
+    codeExists = !!existing;
+  }
+
+  // Créer le dossier patient
+  const [patient] = await query<{ id: string }>(
+    `INSERT INTO patients (full_name, date_of_birth, phone, email, solana_public_key, patient_code)
+     VALUES ($1, $2, $3, $4, '', $5)
+     RETURNING id`,
+    [body.full_name, body.date_of_birth, body.phone, body.email.toLowerCase(), patientCode],
+  );
+
+  // Lier le compte user au dossier patient
+  await query(
+    'UPDATE users SET patient_id = $1 WHERE id = $2',
+    [patient!.id, user!.id],
   );
 
   await query(
@@ -91,7 +129,14 @@ router.post('/patients', async (req, res) => {
     [insurerId, patient!.id, body.contract_type],
   );
 
-  res.status(201).json({ ...body, id: patient!.id, solana_public_key: '' });
+  res.status(201).json({
+    id: user!.id,
+    patient_id: patient!.id,
+    patient_code: patientCode,
+    email: body.email,
+    full_name: body.full_name,
+    is_first_login: true,
+  });
 });
 
 // ── GET /insurer/invoices ────────────────────────────────────────────────────
