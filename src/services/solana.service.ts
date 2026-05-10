@@ -69,37 +69,29 @@ function writeU16LE(n: number): Buffer {
   return buf;
 }
 
-function writeU32LE(n: number): Buffer {
-  const buf = Buffer.alloc(4);
-  buf.writeUInt32LE(n);
-  return buf;
-}
-
-function writeI64LE(n: number): Buffer {
-  const buf = Buffer.alloc(8);
-  buf.writeBigInt64LE(BigInt(n));
-  return buf;
-}
-
-function writeU8(n: number): Buffer {
-  return Buffer.from([n]);
-}
-
 function writeBool(b: boolean): Buffer {
   return Buffer.from([b ? 1 : 0]);
 }
 
-// Borsh enum variant: 4-byte LE index
+export class SolanaWriteError extends Error {
+  constructor(message: string, public readonly cause?: unknown) {
+    super(message);
+    this.name = 'SolanaWriteError';
+  }
+}
+
+// Anchor serializes fieldless enums as a single u8 tag.
 function writeRoleVariant(role: string): Buffer {
   const map: Record<string, number> = {
     hospital_admin: 0,
+    hospital:       0,
     insurer:        1,
     doctor:         2,
     pharmacist:     3,
   };
   const idx = map[role];
   if (idx === undefined) throw new Error(`Rôle inconnu: ${role}`);
-  return writeU32LE(idx);
+  return Buffer.from([idx]);
 }
 
 // ── Singletons ────────────────────────────────────────────────────────────────
@@ -223,6 +215,29 @@ async function buildPartialTx(tx: Transaction): Promise<string> {
 }
 
 /**
+ * Returns a base64 transaction to be signed and paid entirely by the user.
+ * Used for operational instructions where the smart contract expects only the
+ * hospital/doctor/pharmacist/insurer signer and no admin co-signature.
+ */
+async function buildUserSignedTx(
+  tx: Transaction,
+  signerPubkey: PublicKey,
+): Promise<string> {
+  const connection = getConnection();
+  const { blockhash, lastValidBlockHeight } =
+    await connection.getLatestBlockhash('confirmed');
+
+  tx.recentBlockhash = blockhash;
+  tx.lastValidBlockHeight = lastValidBlockHeight;
+  tx.feePayer = signerPubkey;
+
+  return tx.serialize({
+    requireAllSignatures: false,
+    verifySignatures: false,
+  }).toString('base64');
+}
+
+/**
  * Admin sends and confirms a transaction that only requires the admin signature.
  */
 async function sendAdminTx(tx: Transaction): Promise<string> {
@@ -240,10 +255,11 @@ export async function registerEntity(
   entityPubkeyStr: string,
   role: string,
   metadataHash: Buffer,
-): Promise<string | null> {
+) : Promise<string> {
   if (!isSolanaConfigured()) {
-    logger.warn('[Solana] registerEntity ignoré — mode simulation');
-    return null;
+    throw new SolanaWriteError(
+      'SOLANA_ADMIN_PRIVATE_KEY non configurée pour les écritures on-chain',
+    );
   }
   try {
     const admin = getAdminKeypair();
@@ -276,16 +292,20 @@ export async function registerEntity(
     return sig;
   } catch (err) {
     logger.error('[Solana] registerEntity error', err);
-    return null;
+    throw new SolanaWriteError(
+      `Échec on-chain de registerEntity pour ${entityPubkeyStr}`,
+      err,
+    );
   }
 }
 
 // ── approve_entity ────────────────────────────────────────────────────────────
 
-export async function approveEntity(entityPubkeyStr: string): Promise<string | null> {
+export async function approveEntity(entityPubkeyStr: string): Promise<string> {
   if (!isSolanaConfigured()) {
-    logger.warn('[Solana] approveEntity ignoré — mode simulation');
-    return null;
+    throw new SolanaWriteError(
+      'SOLANA_ADMIN_PRIVATE_KEY non configurée pour les écritures on-chain',
+    );
   }
   try {
     const admin = getAdminKeypair();
@@ -309,7 +329,10 @@ export async function approveEntity(entityPubkeyStr: string): Promise<string | n
     return sig;
   } catch (err) {
     logger.error('[Solana] approveEntity error', err);
-    return null;
+    throw new SolanaWriteError(
+      `Échec on-chain de approveEntity pour ${entityPubkeyStr}`,
+      err,
+    );
   }
 }
 
@@ -324,7 +347,6 @@ export async function buildCreatePatientProfileTx(
     return null;
   }
   try {
-    const admin = getAdminKeypair();
     const staffPubkey = new PublicKey(staffPubkeyStr);
     const [configPDA] = deriveConfigPDA();
     const [staffRolePDA] = deriveEntityRolePDA(staffPubkey);
@@ -336,8 +358,7 @@ export async function buildCreatePatientProfileTx(
     const ix = new TransactionInstruction({
       programId: PROGRAM_ID,
       keys: [
-        { pubkey: admin.publicKey, isSigner: true,  isWritable: true  }, // admin
-        { pubkey: staffPubkey,     isSigner: true,  isWritable: false }, // staff (Flutter signs)
+        { pubkey: staffPubkey,     isSigner: true,  isWritable: true  }, // staff pays rent/signs
         { pubkey: configPDA,       isSigner: false, isWritable: false },
         { pubkey: staffRolePDA,    isSigner: false, isWritable: false },
         { pubkey: patientPDA,      isSigner: false, isWritable: true  },
@@ -347,7 +368,7 @@ export async function buildCreatePatientProfileTx(
     });
 
     const tx = new Transaction().add(ix);
-    return buildPartialTx(tx);
+    return buildUserSignedTx(tx, staffPubkey);
   } catch (err) {
     logger.error('[Solana] buildCreatePatientProfileTx error', err);
     return null;
@@ -637,9 +658,9 @@ export async function isEntityApproved(pubkeyStr: string): Promise<boolean> {
     const [rolePDA] = deriveEntityRolePDA(pubkey);
     const info = await getConnection().getAccountInfo(rolePDA);
     if (!info || info.data.length < 10) return false;
-    // EntityStatus is at offset 8 (discriminator) + 32 (entity pubkey) + 4 (role enum) = 44
+    // EntityStatus is at offset 8 (discriminator) + 32 (entity pubkey) + 1 (role enum) = 41
     // status: 0=Pending, 1=Approved, 2=Revoked
-    const status = info.data[44];
+    const status = info.data[41];
     return status === 1;
   } catch {
     return false;

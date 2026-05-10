@@ -57,11 +57,12 @@ cp .env.example .env
 | `JWT_REFRESH_SECRET`      | Secret de signature des refresh tokens (min 32 chars)    | **Oui**     |
 | `JWT_REFRESH_EXPIRES_IN`  | Durée de validité des refresh tokens (défaut : `7d`)     | Non         |
 | `SOLANA_RPC_URL`          | URL du nœud Solana (défaut : devnet)                     | Non         |
+| `SOLANA_ADMIN_PRIVATE_KEY_PATH` | Chemin vers une keypair Solana locale au format JSON array | Non* |
 | `SOLANA_ADMIN_PRIVATE_KEY`| Clé privée admin Solana au format JSON `[1,2,3,...]` ou `[]` en simulation | Non* |
 | `PROGRAM_ID`              | Adresse du programme Solana déployé (défaut : `E7BWwRFQBYXmNqqAfNPYm1ccgWysJqtJrvUSq1NTnooX`) | Non* |
 | `AUTO_REIMB_THRESHOLD`    | Seuil de remboursement automatique en FCFA               | Non         |
 
-> \* Sans `SOLANA_ADMIN_PRIVATE_KEY`, le backend fonctionne en **mode simulation** (les appels on-chain sont skippés). Indispensable uniquement pour les fonctionnalités blockchain réelles.
+> \* Sans `SOLANA_ADMIN_PRIVATE_KEY_PATH` ou `SOLANA_ADMIN_PRIVATE_KEY`, le backend fonctionne en **mode simulation**. Pour les écritures blockchain réelles, configure au moins l'une des deux.
 
 ### Base de données partagée (dev)
 
@@ -84,6 +85,9 @@ Les migrations s'appliquent **automatiquement au démarrage** — aucune command
 ## Démarrage
 
 ```bash
+# Base locale PostgreSQL via Docker
+npm run db:up
+
 # Développement (hot reload)
 npm run dev
 
@@ -91,6 +95,8 @@ npm run dev
 npm run build
 npm start
 ```
+
+Si PostgreSQL n'est pas lancé localement, le backend échouera au démarrage avec `ECONNREFUSED 127.0.0.1:5432`.
 
 Vérifier que le serveur est opérationnel :
 

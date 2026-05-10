@@ -8,7 +8,11 @@ import { AppError } from '../middleware/error';
 import { authenticate } from '../middleware/auth';
 import type { JwtPayload } from '../middleware/auth';
 import { logger } from '../logger';
-import { registerEntity, approveEntity } from '../services/solana.service';
+import {
+  approveEntity,
+  registerEntity,
+  SolanaWriteError,
+} from '../services/solana.service';
 
 const router = Router();
 
@@ -120,6 +124,26 @@ router.post('/change-password', authenticate, async (req, res) => {
     throw new AppError(404, 'Utilisateur introuvable');
   }
 
+  if (body.new_solana_public_key) {
+    const metadataHash = crypto
+      .createHash('sha256')
+      .update(`${currentUser.id}:${currentUser.role}:${currentUser.email}`)
+      .digest();
+
+    try {
+      await registerEntity(body.new_solana_public_key, currentUser.role, metadataHash);
+      await approveEntity(body.new_solana_public_key);
+    } catch (err) {
+      if (err instanceof SolanaWriteError) {
+        throw new AppError(
+          502,
+          `Échec de synchronisation on-chain: ${err.message}`,
+        );
+      }
+      throw err;
+    }
+  }
+
   const newHash = await bcrypt.hash(body.new_password, 12);
   await query(
     `UPDATE users
@@ -137,16 +161,6 @@ router.post('/change-password', authenticate, async (req, res) => {
     role: currentUser.role,
     solanaPublicKey: body.new_solana_public_key,
   };
-
-  // Enregistrer l'entité on-chain après changement de mot de passe
-  if (body.new_solana_public_key) {
-    const metadataHash = crypto
-      .createHash('sha256')
-      .update(`${currentUser.id}:${currentUser.role}:${currentUser.email}`)
-      .digest();
-    await registerEntity(body.new_solana_public_key, currentUser.role, metadataHash);
-    await approveEntity(body.new_solana_public_key);
-  }
 
   res.json({
     ...makeTokenPair(payload),

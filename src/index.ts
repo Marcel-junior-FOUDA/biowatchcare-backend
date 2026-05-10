@@ -52,6 +52,9 @@ app.use(errorHandler);
 // ── Auto-migration ────────────────────────────────────────────────────────────
 async function runMigrations() {
   const migrationsDir = path.resolve(__dirname, '../migrations');
+  if (!fs.existsSync(migrationsDir)) {
+    throw new Error(`Migrations directory not found: ${migrationsDir}`);
+  }
   const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
 
   await db.query(`CREATE TABLE IF NOT EXISTS _migrations (
@@ -98,15 +101,20 @@ async function runMigrations() {
 }
 
 // ── Démarrage ─────────────────────────────────────────────────────────────────
-runMigrations()
-  .then(() => {
-    app.listen(config.port, () => {
-      logger.info(`BioWatchCare API démarré sur le port ${config.port} (${config.nodeEnv})`);
-    });
-  })
-  .catch(err => {
-    logger.error('Impossible de démarrer — migration échouée :', err);
-    process.exit(1);
+async function bootstrap() {
+  await runMigrations();
+
+  app.listen(config.port, () => {
+    logger.info(`BioWatchCare API démarré sur le port ${config.port} (${config.nodeEnv})`);
   });
+}
+
+bootstrap().catch(err => {
+  logger.error('Impossible de démarrer le backend', err);
+  logger.error(
+    'Vérifiez .env / DATABASE_URL / JWT_SECRET / JWT_REFRESH_SECRET et la disponibilité PostgreSQL.',
+  );
+  process.exit(1);
+});
 
 export default app;
