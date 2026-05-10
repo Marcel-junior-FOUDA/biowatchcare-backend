@@ -57,8 +57,8 @@ cp .env.example .env
 | `JWT_REFRESH_SECRET`      | Secret de signature des refresh tokens (min 32 chars)    | **Oui**     |
 | `JWT_REFRESH_EXPIRES_IN`  | Durée de validité des refresh tokens (défaut : `7d`)     | Non         |
 | `SOLANA_RPC_URL`          | URL du nœud Solana (défaut : devnet)                     | Non         |
-| `SOLANA_ADMIN_PRIVATE_KEY`| Clé privée admin Solana au format JSON `[1,2,3,...]`     | Non*        |
-| `PROGRAM_ID`              | Adresse du programme Solana déployé                      | Non*        |
+| `SOLANA_ADMIN_PRIVATE_KEY`| Clé privée admin Solana au format JSON `[1,2,3,...]` ou `[]` en simulation | Non* |
+| `PROGRAM_ID`              | Adresse du programme Solana déployé (défaut : `E7BWwRFQBYXmNqqAfNPYm1ccgWysJqtJrvUSq1NTnooX`) | Non* |
 | `AUTO_REIMB_THRESHOLD`    | Seuil de remboursement automatique en FCFA               | Non         |
 
 > \* Sans `SOLANA_ADMIN_PRIVATE_KEY`, le backend fonctionne en **mode simulation** (les appels on-chain sont skippés). Indispensable uniquement pour les fonctionnalités blockchain réelles.
@@ -173,6 +173,7 @@ Authorization: Bearer <access_token>
 - **Access token** : durée 15 min
 - **Refresh token** : durée 7 jours, à envoyer sur `POST /auth/refresh`
 - À la première connexion, `is_first_login: true` force le changement de mot de passe
+- Si la clé publique Solana dérivée côté client change, le backend synchronise aussi le rôle on-chain avant de persister la nouvelle clé
 
 ---
 

@@ -1,5 +1,7 @@
 import 'dotenv/config';
 
+const DEFAULT_PROGRAM_ID = 'E7BWwRFQBYXmNqqAfNPYm1ccgWysJqtJrvUSq1NTnooX';
+
 function required(key: string): string {
   const val = process.env[key];
   if (!val) throw new Error(`Missing env var: ${key}`);
@@ -28,7 +30,7 @@ export const config = {
     ) as number[],
     programId:
       process.env['PROGRAM_ID'] ??
-      'FhXSGiUzcvtAVqXM8tyy1HzUf4mFxkUQEvwgmjLRgow3',
+      DEFAULT_PROGRAM_ID,
   },
 
   autoReimbThreshold: parseInt(

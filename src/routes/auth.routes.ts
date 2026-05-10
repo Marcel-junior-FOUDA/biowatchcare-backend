@@ -8,7 +8,7 @@ import { AppError } from '../middleware/error';
 import { authenticate } from '../middleware/auth';
 import type { JwtPayload } from '../middleware/auth';
 import { logger } from '../logger';
-import { registerEntity, approveEntity } from '../services/solana.service';
+import { ensureEntityApproved } from '../services/solana.service';
 
 const router = Router();
 
@@ -20,7 +20,7 @@ const loginSchema = z.object({
     z.string().email('Adresse e-mail invalide'),
   ),
   password: z.string().min(1, 'Mot de passe requis'),
-  solana_public_key: z.string().optional().default(''),
+  solana_public_key: z.string().min(32, 'Clé publique Solana requise'),
 });
 
 const changePasswordSchema = z.object({
@@ -62,6 +62,12 @@ router.post('/login', async (req, res) => {
 
   // Update solana pubkey if changed (key rotation on password change)
   if (user.solana_public_key !== body.solana_public_key) {
+    const metadataHash = crypto
+      .createHash('sha256')
+      .update(`${user.id}:${user.role}:${user.email}`)
+      .digest();
+
+    await ensureEntityApproved(body.solana_public_key, user.role, metadataHash);
     await query(
       'UPDATE users SET solana_public_key = $1, updated_at = NOW() WHERE id = $2',
       [body.solana_public_key, user.id],
@@ -106,6 +112,30 @@ router.post('/change-password', authenticate, async (req, res) => {
     throw new AppError(401, 'Mot de passe actuel incorrect');
   }
 
+  const currentUser = await queryOne<{
+    id: string;
+    email: string;
+    role: string;
+    display_name: string | null;
+    hospital_id: string | null;
+  }>(
+    'SELECT id, email, role, display_name, hospital_id FROM users WHERE id = $1',
+    [userId],
+  );
+  if (!currentUser) {
+    throw new AppError(404, 'Utilisateur introuvable');
+  }
+
+  const metadataHash = crypto
+    .createHash('sha256')
+    .update(`${currentUser.id}:${currentUser.role}:${currentUser.email}`)
+    .digest();
+  await ensureEntityApproved(
+    body.new_solana_public_key,
+    currentUser.role,
+    metadataHash,
+  );
+
   const newHash = await bcrypt.hash(body.new_password, 12);
   await query(
     `UPDATE users
@@ -117,41 +147,17 @@ router.post('/change-password', authenticate, async (req, res) => {
     [newHash, body.new_solana_public_key, userId],
   );
 
-  const updatedUser = await queryOne<{
-    id: string;
-    email: string;
-    role: string;
-    display_name: string | null;
-    hospital_id: string | null;
-  }>(
-    'SELECT id, email, role, display_name, hospital_id FROM users WHERE id = $1',
-    [userId],
-  );
-
-  // Enregistrer l'entité on-chain si la clé publique est fournie
-  // Le smart contract requiert admin + entité comme signataires.
-  // On envoie register_entity (admin-only) puis approve_entity immédiatement.
-  if (body.new_solana_public_key) {
-    const metadataHash = crypto
-      .createHash('sha256')
-      .update(`${updatedUser!.id}:${updatedUser!.role}:${updatedUser!.email}`)
-      .digest();
-
-    await registerEntity(body.new_solana_public_key, updatedUser!.role, metadataHash);
-    await approveEntity(body.new_solana_public_key);
-  }
-
   const payload: JwtPayload = {
-    sub: updatedUser!.id,
-    email: updatedUser!.email,
-    role: updatedUser!.role,
+    sub: currentUser.id,
+    email: currentUser.email,
+    role: currentUser.role,
     solanaPublicKey: body.new_solana_public_key,
   };
 
   res.json({
     ...makeTokenPair(payload),
     user: {
-      ...updatedUser,
+      ...currentUser,
       solana_public_key: body.new_solana_public_key,
       is_first_login: false,
     },

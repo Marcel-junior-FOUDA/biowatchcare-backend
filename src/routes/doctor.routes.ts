@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'crypto';
-import { PublicKey } from '@solana/web3.js';
 import { query, queryOne } from '../db';
 import { authenticate, requireRole } from '../middleware/auth';
 import { AppError } from '../middleware/error';

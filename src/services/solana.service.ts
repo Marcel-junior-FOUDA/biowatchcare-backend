@@ -171,7 +171,6 @@ function roleVariant(role: string): Record<string, object> {
  */
 async function buildPartialTx(
   instruction: Transaction,
-  entityKeypairOrPubkey: PublicKey,
 ): Promise<string> {
   const connection = getConnection();
   const admin = getAdminKeypair();
@@ -268,6 +267,37 @@ export async function approveEntity(
 }
 
 /**
+ * Ensures an entity role exists and is approved for the provided wallet.
+ * This is used by auth flows when a user's derived wallet changes.
+ */
+export async function ensureEntityApproved(
+  entityPubkeyStr: string,
+  role: string,
+  metadataHash: Buffer,
+): Promise<void> {
+  if (!isSolanaConfigured()) {
+    logger.warn('[Solana] ensureEntityApproved ignoré — mode simulation');
+    return;
+  }
+
+  const entityPubkey = new PublicKey(entityPubkeyStr);
+  const [rolePDA] = deriveEntityRolePDA(entityPubkey);
+  const roleAccount = await getConnection().getAccountInfo(rolePDA, 'confirmed');
+
+  if (!roleAccount) {
+    const registerSig = await registerEntity(entityPubkeyStr, role, metadataHash);
+    if (!registerSig) {
+      throw new Error(`Impossible d'enregistrer le rôle Solana pour ${entityPubkeyStr}`);
+    }
+  }
+
+  const approveSig = await approveEntity(entityPubkeyStr);
+  if (!approveSig) {
+    throw new Error(`Impossible d'approuver le rôle Solana pour ${entityPubkeyStr}`);
+  }
+}
+
+/**
  * create_patient_profile — requires admin + staff (hospital/insurer) signature.
  * Returns a base64 partially-signed transaction for Flutter to co-sign.
  */
@@ -299,7 +329,7 @@ export async function buildCreatePatientProfileTx(
       })
       .transaction();
 
-    return buildPartialTx(ix, staffPubkey);
+    return buildPartialTx(ix);
   } catch (err) {
     logger.error('[Solana] buildCreatePatientProfileTx error', err);
     return null;
@@ -340,7 +370,7 @@ export async function buildAddPrescriptionTx(
       })
       .transaction();
 
-    return buildPartialTx(ix, doctorPubkey);
+    return buildPartialTx(ix);
   } catch (err) {
     logger.error('[Solana] buildAddPrescriptionTx error', err);
     return null;
@@ -379,7 +409,7 @@ export async function buildIssueQrTokenTx(
       })
       .transaction();
 
-    return buildPartialTx(ix, doctorPubkey);
+    return buildPartialTx(ix);
   } catch (err) {
     logger.error('[Solana] buildIssueQrTokenTx error', err);
     return null;
@@ -420,7 +450,7 @@ export async function buildDispenseWithQrTx(
       })
       .transaction();
 
-    return buildPartialTx(ix, pharmacistPubkey);
+    return buildPartialTx(ix);
   } catch (err) {
     logger.error('[Solana] buildDispenseWithQrTx error', err);
     return null;
@@ -470,7 +500,7 @@ export async function buildCreateInvoiceTx(
       })
       .transaction();
 
-    return buildPartialTx(ix, hospitalPubkey);
+    return buildPartialTx(ix);
   } catch (err) {
     logger.error('[Solana] buildCreateInvoiceTx error', err);
     return null;
@@ -513,7 +543,7 @@ export async function buildAutoOrPendingClaimTx(
       })
       .transaction();
 
-    return buildPartialTx(ix, hospitalPubkey);
+    return buildPartialTx(ix);
   } catch (err) {
     logger.error('[Solana] buildAutoOrPendingClaimTx error', err);
     return null;
@@ -552,7 +582,7 @@ export async function buildInsurerDecideClaimTx(
       })
       .transaction();
 
-    return buildPartialTx(ix, insurerPubkey);
+    return buildPartialTx(ix);
   } catch (err) {
     logger.error('[Solana] buildInsurerDecideClaimTx error', err);
     return null;

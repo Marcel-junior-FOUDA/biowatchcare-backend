@@ -5,7 +5,6 @@ import { query, queryOne } from '../db';
 import { authenticate, requireRole } from '../middleware/auth';
 import { AppError } from '../middleware/error';
 import { logger } from '../logger';
-import { config } from '../config';
 import {
   buildCreatePatientProfileTx,
   buildInsurerDecideClaimTx,
