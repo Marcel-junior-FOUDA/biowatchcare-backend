@@ -144,8 +144,8 @@ router.post('/qr/dispense', async (req, res) => {
 router.get('/dispenses', async (req, res) => {
   const pharmacistId = req.user!.sub;
   const rows = await query(
-    `SELECT d.id, p.full_name AS patient_name, rx.rx_hash,
-            d.dispensed_at
+    `SELECT d.id, d.prescription_id, p.full_name AS patient_name,
+            rx.rx_hash, d.dispensed_at
      FROM dispenses d
      JOIN prescriptions rx ON rx.id = d.prescription_id
      JOIN patients p ON p.id = rx.patient_id
@@ -174,12 +174,18 @@ router.get('/prescriptions/:id', async (req, res) => {
     `SELECT rx.id, rx.patient_id, rx.rx_hash, rx.medications_json, rx.status, rx.created_at,
             p.full_name AS patient_name,
             u.display_name AS doctor_name,
-            c.motif, c.conclusion
+            c.motif, c.conclusion,
+            qt.token_hash AS qr_token,
+            qt.expires_at AS qr_expires_at,
+            qt.used AS qr_used
      FROM prescriptions rx
      JOIN patients p ON p.id = rx.patient_id
      JOIN users u ON u.id = rx.doctor_id
      LEFT JOIN consultations c ON c.id = rx.consultation_id
-     WHERE rx.id = $1`,
+     LEFT JOIN qr_tokens qt ON qt.prescription_id = rx.id
+       AND qt.used = false AND qt.expires_at > NOW()
+     WHERE rx.id = $1
+     LIMIT 1`,
     [req.params['id']],
   );
   if (!rx) throw new AppError(404, 'Ordonnance introuvable');
