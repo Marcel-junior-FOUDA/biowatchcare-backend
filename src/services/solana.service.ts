@@ -3,17 +3,13 @@ import {
   Keypair,
   PublicKey,
   Transaction,
+  TransactionInstruction,
+  SystemProgram,
+  sendAndConfirmTransaction,
 } from '@solana/web3.js';
-import {
-  AnchorProvider,
-  Program,
-  Wallet,
-  BN,
-} from '@coral-xyz/anchor';
+import crypto from 'crypto';
 import { config } from '../config';
 import { logger } from '../logger';
-import idl from './biowatchcare.idl.json';
-import type { Idl } from '@coral-xyz/anchor';
 
 // ── Seeds (mirrors constants.rs) ─────────────────────────────────────────────
 
@@ -30,13 +26,86 @@ const SEEDS = {
 };
 
 const PROGRAM_ID = new PublicKey(config.solana.programId);
+const SYSTEM_PROGRAM = SystemProgram.programId;
+
+// ── Discriminators (sha256('global:<snake_case_name>')[0..8]) ─────────────────
+
+function disc(name: string): Buffer {
+  return crypto.createHash('sha256').update(`global:${name}`).digest().slice(0, 8);
+}
+
+const DISC = {
+  initialize_config:     disc('initialize_config'),
+  register_entity:       disc('register_entity'),
+  approve_entity:        disc('approve_entity'),
+  revoke_entity:         disc('revoke_entity'),
+  create_patient_profile:disc('create_patient_profile'),
+  add_prescription:      disc('add_prescription'),
+  issue_qr_token:        disc('issue_qr_token'),
+  verify_qr_token:       disc('verify_qr_token'),
+  dispense_with_qr:      disc('dispense_with_qr'),
+  create_invoice:        disc('create_invoice'),
+  auto_or_pending_claim: disc('auto_or_pending_claim'),
+  insurer_decide_claim:  disc('insurer_decide_claim'),
+  grant_consent:         disc('grant_consent'),
+  revoke_consent:        disc('revoke_consent'),
+};
+
+// ── Borsh helpers ─────────────────────────────────────────────────────────────
+
+function writePubkey(pk: PublicKey): Buffer {
+  return pk.toBuffer();
+}
+
+function writeU64LE(n: number): Buffer {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(BigInt(n));
+  return buf;
+}
+
+function writeU16LE(n: number): Buffer {
+  const buf = Buffer.alloc(2);
+  buf.writeUInt16LE(n);
+  return buf;
+}
+
+function writeU32LE(n: number): Buffer {
+  const buf = Buffer.alloc(4);
+  buf.writeUInt32LE(n);
+  return buf;
+}
+
+function writeI64LE(n: number): Buffer {
+  const buf = Buffer.alloc(8);
+  buf.writeBigInt64LE(BigInt(n));
+  return buf;
+}
+
+function writeU8(n: number): Buffer {
+  return Buffer.from([n]);
+}
+
+function writeBool(b: boolean): Buffer {
+  return Buffer.from([b ? 1 : 0]);
+}
+
+// Borsh enum variant: 4-byte LE index
+function writeRoleVariant(role: string): Buffer {
+  const map: Record<string, number> = {
+    hospital_admin: 0,
+    insurer:        1,
+    doctor:         2,
+    pharmacist:     3,
+  };
+  const idx = map[role];
+  if (idx === undefined) throw new Error(`Rôle inconnu: ${role}`);
+  return writeU32LE(idx);
+}
 
 // ── Singletons ────────────────────────────────────────────────────────────────
 
 let _connection: Connection;
 let _adminKeypair: Keypair;
-let _provider: AnchorProvider;
-let _program: Program;
 
 function getConnection(): Connection {
   if (!_connection) {
@@ -57,24 +126,6 @@ function getAdminKeypair(): Keypair {
     }
   }
   return _adminKeypair;
-}
-
-export function getProvider(): AnchorProvider {
-  if (!_provider) {
-    const wallet = new Wallet(getAdminKeypair());
-    _provider = new AnchorProvider(getConnection(), wallet, {
-      commitment: 'confirmed',
-      skipPreflight: false,
-    });
-  }
-  return _provider;
-}
-
-function getProgram(): Program {
-  if (!_program) {
-    _program = new Program(idl as unknown as Idl, getProvider());
-  }
-  return _program;
 }
 
 export function isSolanaConfigured(): boolean {
@@ -151,50 +202,40 @@ export function deriveClaimPDA(
   );
 }
 
-// ── Role mapping ─────────────────────────────────────────────────────────────
-
-function roleVariant(role: string): Record<string, object> {
-  switch (role) {
-    case 'hospital_admin': return { hospital: {} };
-    case 'insurer':        return { insurer: {} };
-    case 'doctor':         return { doctor: {} };
-    case 'pharmacist':     return { pharmacist: {} };
-    default: throw new Error(`Rôle inconnu pour Solana : ${role}`);
-  }
-}
-
-// ── Partial-signature helpers ─────────────────────────────────────────────────
+// ── Transaction builders ──────────────────────────────────────────────────────
 
 /**
- * Builds a transaction, admin-signs it, and returns the base64-encoded
- * partially-signed transaction for the Flutter client to co-sign and broadcast.
+ * Admin-signs the transaction and returns base64-encoded partial tx
+ * for Flutter to co-sign with the entity keypair and broadcast.
  */
-async function buildPartialTx(
-  instruction: Transaction,
-): Promise<string> {
+async function buildPartialTx(tx: Transaction): Promise<string> {
   const connection = getConnection();
   const admin = getAdminKeypair();
   const { blockhash, lastValidBlockHeight } =
     await connection.getLatestBlockhash('confirmed');
 
-  instruction.recentBlockhash = blockhash;
-  instruction.lastValidBlockHeight = lastValidBlockHeight;
-  instruction.feePayer = admin.publicKey;
+  tx.recentBlockhash = blockhash;
+  tx.lastValidBlockHeight = lastValidBlockHeight;
+  tx.feePayer = admin.publicKey;
+  tx.partialSign(admin);
 
-  // Admin signs, entity signature will be added by Flutter
-  instruction.partialSign(admin);
-
-  // Return base64-encoded partially-signed transaction
-  const serialized = instruction.serialize({ requireAllSignatures: false });
-  return serialized.toString('base64');
+  return tx.serialize({ requireAllSignatures: false }).toString('base64');
 }
 
-// ── On-chain write operations ─────────────────────────────────────────────────
-
 /**
- * register_entity — admin-only, no co-signature needed.
- * Called when a user sets their Solana key for the first time.
+ * Admin sends and confirms a transaction that only requires the admin signature.
  */
+async function sendAdminTx(tx: Transaction): Promise<string> {
+  const connection = getConnection();
+  const admin = getAdminKeypair();
+  const sig = await sendAndConfirmTransaction(connection, tx, [admin], {
+    commitment: 'confirmed',
+  });
+  return sig;
+}
+
+// ── register_entity ───────────────────────────────────────────────────────────
+
 export async function registerEntity(
   entityPubkeyStr: string,
   role: string,
@@ -205,23 +246,32 @@ export async function registerEntity(
     return null;
   }
   try {
-    const program = getProgram();
     const admin = getAdminKeypair();
     const entityPubkey = new PublicKey(entityPubkeyStr);
     const [configPDA] = deriveConfigPDA();
     const [rolePDA] = deriveEntityRolePDA(entityPubkey);
 
-    const sig = await (program.methods as any)
-      .registerEntity(roleVariant(role), entityPubkey, [...metadataHash])
-      .accounts({
-        admin: admin.publicKey,
-        config: configPDA,
-        roleAccount: rolePDA,
-        systemProgram: '11111111111111111111111111111111',
-      })
-      .signers([admin])
-      .rpc();
+    // register_entity(role: Role, entity_pubkey: Pubkey, metadata_hash: [u8;32])
+    const data = Buffer.concat([
+      DISC.register_entity,
+      writeRoleVariant(role),
+      writePubkey(entityPubkey),
+      metadataHash,
+    ]);
 
+    const ix = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: admin.publicKey, isSigner: true,  isWritable: true  }, // admin
+        { pubkey: configPDA,       isSigner: false, isWritable: false }, // config
+        { pubkey: rolePDA,         isSigner: false, isWritable: true  }, // role_account
+        { pubkey: SYSTEM_PROGRAM,  isSigner: false, isWritable: false },
+      ],
+      data,
+    });
+
+    const tx = new Transaction().add(ix);
+    const sig = await sendAdminTx(tx);
     logger.info(`[Solana] registerEntity OK — ${entityPubkeyStr} sig=${sig}`);
     return sig;
   } catch (err) {
@@ -230,34 +280,31 @@ export async function registerEntity(
   }
 }
 
-/**
- * approve_entity — admin-only.
- * Called after register_entity to approve the entity on-chain.
- */
-export async function approveEntity(
-  entityPubkeyStr: string,
-): Promise<string | null> {
+// ── approve_entity ────────────────────────────────────────────────────────────
+
+export async function approveEntity(entityPubkeyStr: string): Promise<string | null> {
   if (!isSolanaConfigured()) {
     logger.warn('[Solana] approveEntity ignoré — mode simulation');
     return null;
   }
   try {
-    const program = getProgram();
     const admin = getAdminKeypair();
     const entityPubkey = new PublicKey(entityPubkeyStr);
     const [configPDA] = deriveConfigPDA();
     const [rolePDA] = deriveEntityRolePDA(entityPubkey);
 
-    const sig = await (program.methods as any)
-      .approveEntity()
-      .accounts({
-        admin: admin.publicKey,
-        config: configPDA,
-        roleAccount: rolePDA,
-      })
-      .signers([admin])
-      .rpc();
+    const ix = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: admin.publicKey, isSigner: true,  isWritable: true  },
+        { pubkey: configPDA,       isSigner: false, isWritable: false },
+        { pubkey: rolePDA,         isSigner: false, isWritable: true  },
+      ],
+      data: DISC.approve_entity,
+    });
 
+    const tx = new Transaction().add(ix);
+    const sig = await sendAdminTx(tx);
     logger.info(`[Solana] approveEntity OK — ${entityPubkeyStr} sig=${sig}`);
     return sig;
   } catch (err) {
@@ -266,41 +313,8 @@ export async function approveEntity(
   }
 }
 
-/**
- * Ensures an entity role exists and is approved for the provided wallet.
- * This is used by auth flows when a user's derived wallet changes.
- */
-export async function ensureEntityApproved(
-  entityPubkeyStr: string,
-  role: string,
-  metadataHash: Buffer,
-): Promise<void> {
-  if (!isSolanaConfigured()) {
-    logger.warn('[Solana] ensureEntityApproved ignoré — mode simulation');
-    return;
-  }
+// ── create_patient_profile ────────────────────────────────────────────────────
 
-  const entityPubkey = new PublicKey(entityPubkeyStr);
-  const [rolePDA] = deriveEntityRolePDA(entityPubkey);
-  const roleAccount = await getConnection().getAccountInfo(rolePDA, 'confirmed');
-
-  if (!roleAccount) {
-    const registerSig = await registerEntity(entityPubkeyStr, role, metadataHash);
-    if (!registerSig) {
-      throw new Error(`Impossible d'enregistrer le rôle Solana pour ${entityPubkeyStr}`);
-    }
-  }
-
-  const approveSig = await approveEntity(entityPubkeyStr);
-  if (!approveSig) {
-    throw new Error(`Impossible d'approuver le rôle Solana pour ${entityPubkeyStr}`);
-  }
-}
-
-/**
- * create_patient_profile — requires admin + staff (hospital/insurer) signature.
- * Returns a base64 partially-signed transaction for Flutter to co-sign.
- */
 export async function buildCreatePatientProfileTx(
   patientIdHash: Buffer,
   staffPubkeyStr: string,
@@ -310,36 +324,38 @@ export async function buildCreatePatientProfileTx(
     return null;
   }
   try {
-    const program = getProgram();
     const admin = getAdminKeypair();
     const staffPubkey = new PublicKey(staffPubkeyStr);
     const [configPDA] = deriveConfigPDA();
     const [staffRolePDA] = deriveEntityRolePDA(staffPubkey);
     const [patientPDA] = derivePatientProfilePDA(patientIdHash);
 
-    const ix = await (program.methods as any)
-      .createPatientProfile([...patientIdHash])
-      .accounts({
-        admin: admin.publicKey,
-        staff: staffPubkey,
-        config: configPDA,
-        staffRole: staffRolePDA,
-        patient: patientPDA,
-        systemProgram: '11111111111111111111111111111111',
-      })
-      .transaction();
+    // create_patient_profile(patient_id_hash: [u8;32])
+    const data = Buffer.concat([DISC.create_patient_profile, patientIdHash]);
 
-    return buildPartialTx(ix);
+    const ix = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: admin.publicKey, isSigner: true,  isWritable: true  }, // admin
+        { pubkey: staffPubkey,     isSigner: true,  isWritable: false }, // staff (Flutter signs)
+        { pubkey: configPDA,       isSigner: false, isWritable: false },
+        { pubkey: staffRolePDA,    isSigner: false, isWritable: false },
+        { pubkey: patientPDA,      isSigner: false, isWritable: true  },
+        { pubkey: SYSTEM_PROGRAM,  isSigner: false, isWritable: false },
+      ],
+      data,
+    });
+
+    const tx = new Transaction().add(ix);
+    return buildPartialTx(tx);
   } catch (err) {
     logger.error('[Solana] buildCreatePatientProfileTx error', err);
     return null;
   }
 }
 
-/**
- * add_prescription — requires admin + doctor signature.
- * Returns a base64 partially-signed transaction for Flutter to co-sign.
- */
+// ── add_prescription ──────────────────────────────────────────────────────────
+
 export async function buildAddPrescriptionTx(
   patientIdHash: Buffer,
   rxHash: Buffer,
@@ -351,36 +367,38 @@ export async function buildAddPrescriptionTx(
     return null;
   }
   try {
-    const program = getProgram();
     const admin = getAdminKeypair();
     const doctorPubkey = new PublicKey(doctorPubkeyStr);
     const [doctorRolePDA] = deriveEntityRolePDA(doctorPubkey);
     const [patientPDA] = derivePatientProfilePDA(patientIdHash);
     const [prescriptionPDA] = derivePrescriptionPDA(patientPDA, rxHash);
 
-    const ix = await (program.methods as any)
-      .addPrescription([...patientIdHash], [...rxHash], [...pointerHash])
-      .accounts({
-        admin: admin.publicKey,
-        doctor: doctorPubkey,
-        doctorRole: doctorRolePDA,
-        patient: patientPDA,
-        prescription: prescriptionPDA,
-        systemProgram: '11111111111111111111111111111111',
-      })
-      .transaction();
+    // add_prescription(patient_id_hash, rx_hash, pointer_hash)
+    const data = Buffer.concat([DISC.add_prescription, patientIdHash, rxHash, pointerHash]);
 
-    return buildPartialTx(ix);
+    const ix = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: admin.publicKey,   isSigner: true,  isWritable: true  },
+        { pubkey: doctorPubkey,      isSigner: true,  isWritable: false },
+        { pubkey: doctorRolePDA,     isSigner: false, isWritable: false },
+        { pubkey: patientPDA,        isSigner: false, isWritable: false },
+        { pubkey: prescriptionPDA,   isSigner: false, isWritable: true  },
+        { pubkey: SYSTEM_PROGRAM,    isSigner: false, isWritable: false },
+      ],
+      data,
+    });
+
+    const tx = new Transaction().add(ix);
+    return buildPartialTx(tx);
   } catch (err) {
     logger.error('[Solana] buildAddPrescriptionTx error', err);
     return null;
   }
 }
 
-/**
- * issue_qr_token — requires admin + doctor signature.
- * Returns a base64 partially-signed transaction for Flutter to co-sign.
- */
+// ── issue_qr_token ────────────────────────────────────────────────────────────
+
 export async function buildIssueQrTokenTx(
   prescriptionPDA: PublicKey,
   tokenHash: Buffer,
@@ -391,35 +409,37 @@ export async function buildIssueQrTokenTx(
     return null;
   }
   try {
-    const program = getProgram();
     const admin = getAdminKeypair();
     const doctorPubkey = new PublicKey(doctorPubkeyStr);
     const [doctorRolePDA] = deriveEntityRolePDA(doctorPubkey);
     const [qrPDA] = deriveQrTokenPDA(prescriptionPDA, tokenHash);
 
-    const ix = await (program.methods as any)
-      .issueQrToken([...tokenHash])
-      .accounts({
-        admin: admin.publicKey,
-        doctor: doctorPubkey,
-        doctorRole: doctorRolePDA,
-        prescription: prescriptionPDA,
-        qrToken: qrPDA,
-        systemProgram: '11111111111111111111111111111111',
-      })
-      .transaction();
+    // issue_qr_token(token_hash: [u8;32])
+    const data = Buffer.concat([DISC.issue_qr_token, tokenHash]);
 
-    return buildPartialTx(ix);
+    const ix = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: admin.publicKey, isSigner: true,  isWritable: true  },
+        { pubkey: doctorPubkey,    isSigner: true,  isWritable: false },
+        { pubkey: doctorRolePDA,   isSigner: false, isWritable: false },
+        { pubkey: prescriptionPDA, isSigner: false, isWritable: true  },
+        { pubkey: qrPDA,           isSigner: false, isWritable: true  },
+        { pubkey: SYSTEM_PROGRAM,  isSigner: false, isWritable: false },
+      ],
+      data,
+    });
+
+    const tx = new Transaction().add(ix);
+    return buildPartialTx(tx);
   } catch (err) {
     logger.error('[Solana] buildIssueQrTokenTx error', err);
     return null;
   }
 }
 
-/**
- * dispense_with_qr — requires admin + pharmacist signature.
- * Returns a base64 partially-signed transaction for Flutter to co-sign.
- */
+// ── dispense_with_qr ──────────────────────────────────────────────────────────
+
 export async function buildDispenseWithQrTx(
   qrTokenPDA: PublicKey,
   dispenseHash: Buffer,
@@ -430,37 +450,44 @@ export async function buildDispenseWithQrTx(
     return null;
   }
   try {
-    const program = getProgram();
     const admin = getAdminKeypair();
     const pharmacistPubkey = new PublicKey(pharmacistPubkeyStr);
     const [pharmacistRolePDA] = deriveEntityRolePDA(pharmacistPubkey);
-    const qrAccount = await (program.account as any).qrToken.fetch(qrTokenPDA);
-    const prescriptionPDA: PublicKey = qrAccount.prescription;
+
+    // On doit retrouver la prescriptionPDA depuis le compte qrToken on-chain
+    const conn = getConnection();
+    const qrInfo = await conn.getAccountInfo(qrTokenPDA);
+    if (!qrInfo) throw new Error('QrToken PDA introuvable on-chain');
+    // prescriptionPDA = bytes 8..40 du compte QrToken (après discriminator)
+    const prescriptionPDA = new PublicKey(qrInfo.data.slice(8, 40));
     const [dispensePDA] = deriveDispensePDA(prescriptionPDA, pharmacistPubkey);
 
-    const ix = await (program.methods as any)
-      .dispenseWithQr([...dispenseHash])
-      .accounts({
-        admin: admin.publicKey,
-        pharmacist: pharmacistPubkey,
-        pharmacistRole: pharmacistRolePDA,
-        qrToken: qrTokenPDA,
-        dispense: dispensePDA,
-        systemProgram: '11111111111111111111111111111111',
-      })
-      .transaction();
+    // dispense_with_qr(dispense_hash: [u8;32])
+    const data = Buffer.concat([DISC.dispense_with_qr, dispenseHash]);
 
-    return buildPartialTx(ix);
+    const ix = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: admin.publicKey,    isSigner: true,  isWritable: true  },
+        { pubkey: pharmacistPubkey,   isSigner: true,  isWritable: false },
+        { pubkey: pharmacistRolePDA,  isSigner: false, isWritable: false },
+        { pubkey: qrTokenPDA,         isSigner: false, isWritable: true  },
+        { pubkey: dispensePDA,        isSigner: false, isWritable: true  },
+        { pubkey: SYSTEM_PROGRAM,     isSigner: false, isWritable: false },
+      ],
+      data,
+    });
+
+    const tx = new Transaction().add(ix);
+    return buildPartialTx(tx);
   } catch (err) {
     logger.error('[Solana] buildDispenseWithQrTx error', err);
     return null;
   }
 }
 
-/**
- * create_invoice — requires admin + hospital signature.
- * Returns a base64 partially-signed transaction for Flutter to co-sign.
- */
+// ── create_invoice ────────────────────────────────────────────────────────────
+
 export async function buildCreateInvoiceTx(
   patientIdHash: Buffer,
   invoiceHash: Buffer,
@@ -473,7 +500,6 @@ export async function buildCreateInvoiceTx(
     return null;
   }
   try {
-    const program = getProgram();
     const admin = getAdminKeypair();
     const hospitalPubkey = new PublicKey(hospitalPubkeyStr);
     const [hospitalRolePDA] = deriveEntityRolePDA(hospitalPubkey);
@@ -481,36 +507,40 @@ export async function buildCreateInvoiceTx(
     const [invoicePDA] = deriveInvoicePDA(patientPDA, invoiceHash);
 
     const currencyBytes = Buffer.alloc(3);
-    currencyBytes.write(currencyCode.slice(0, 3).toUpperCase());
+    Buffer.from(currencyCode.slice(0, 3).toUpperCase()).copy(currencyBytes);
 
-    const ix = await (program.methods as any)
-      .createInvoice(
-        [...patientIdHash],
-        [...invoiceHash],
-        new BN(amount),
-        [...currencyBytes],
-      )
-      .accounts({
-        admin: admin.publicKey,
-        hospital: hospitalPubkey,
-        hospitalRole: hospitalRolePDA,
-        patient: patientPDA,
-        invoice: invoicePDA,
-        systemProgram: '11111111111111111111111111111111',
-      })
-      .transaction();
+    // create_invoice(patient_id_hash, invoice_hash, amount: u64, currency_code: [u8;3])
+    const data = Buffer.concat([
+      DISC.create_invoice,
+      patientIdHash,
+      invoiceHash,
+      writeU64LE(amount),
+      currencyBytes,
+    ]);
 
-    return buildPartialTx(ix);
+    const ix = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: admin.publicKey,  isSigner: true,  isWritable: true  },
+        { pubkey: hospitalPubkey,   isSigner: true,  isWritable: false },
+        { pubkey: hospitalRolePDA,  isSigner: false, isWritable: false },
+        { pubkey: patientPDA,       isSigner: false, isWritable: false },
+        { pubkey: invoicePDA,       isSigner: false, isWritable: true  },
+        { pubkey: SYSTEM_PROGRAM,   isSigner: false, isWritable: false },
+      ],
+      data,
+    });
+
+    const tx = new Transaction().add(ix);
+    return buildPartialTx(tx);
   } catch (err) {
     logger.error('[Solana] buildCreateInvoiceTx error', err);
     return null;
   }
 }
 
-/**
- * auto_or_pending_claim — requires admin + hospital signature.
- * Returns a base64 partially-signed transaction for Flutter to co-sign.
- */
+// ── auto_or_pending_claim ─────────────────────────────────────────────────────
+
 export async function buildAutoOrPendingClaimTx(
   invoicePDA: PublicKey,
   insurerPubkeyStr: string,
@@ -521,7 +551,6 @@ export async function buildAutoOrPendingClaimTx(
     return null;
   }
   try {
-    const program = getProgram();
     const admin = getAdminKeypair();
     const hospitalPubkey = new PublicKey(hospitalPubkeyStr);
     const insurerPubkey = new PublicKey(insurerPubkeyStr);
@@ -529,31 +558,34 @@ export async function buildAutoOrPendingClaimTx(
     const [configPDA] = deriveConfigPDA();
     const [claimPDA] = deriveClaimPDA(invoicePDA, insurerPubkey);
 
-    const ix = await (program.methods as any)
-      .autoOrPendingClaim(insurerPubkey)
-      .accounts({
-        admin: admin.publicKey,
-        hospital: hospitalPubkey,
-        hospitalRole: hospitalRolePDA,
-        config: configPDA,
-        invoice: invoicePDA,
-        claim: claimPDA,
-        insurer: insurerPubkey,
-        systemProgram: '11111111111111111111111111111111',
-      })
-      .transaction();
+    // auto_or_pending_claim(insurer: Pubkey)
+    const data = Buffer.concat([DISC.auto_or_pending_claim, writePubkey(insurerPubkey)]);
 
-    return buildPartialTx(ix);
+    const ix = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: admin.publicKey,  isSigner: true,  isWritable: true  },
+        { pubkey: hospitalPubkey,   isSigner: true,  isWritable: false },
+        { pubkey: hospitalRolePDA,  isSigner: false, isWritable: false },
+        { pubkey: configPDA,        isSigner: false, isWritable: false },
+        { pubkey: invoicePDA,       isSigner: false, isWritable: true  },
+        { pubkey: claimPDA,         isSigner: false, isWritable: true  },
+        { pubkey: insurerPubkey,    isSigner: false, isWritable: false },
+        { pubkey: SYSTEM_PROGRAM,   isSigner: false, isWritable: false },
+      ],
+      data,
+    });
+
+    const tx = new Transaction().add(ix);
+    return buildPartialTx(tx);
   } catch (err) {
     logger.error('[Solana] buildAutoOrPendingClaimTx error', err);
     return null;
   }
 }
 
-/**
- * insurer_decide_claim — requires admin + insurer signature.
- * Returns a base64 partially-signed transaction for Flutter to co-sign.
- */
+// ── insurer_decide_claim ──────────────────────────────────────────────────────
+
 export async function buildInsurerDecideClaimTx(
   invoicePDA: PublicKey,
   insurerPubkeyStr: string,
@@ -565,65 +597,50 @@ export async function buildInsurerDecideClaimTx(
     return null;
   }
   try {
-    const program = getProgram();
     const admin = getAdminKeypair();
     const insurerPubkey = new PublicKey(insurerPubkeyStr);
     const [insurerRolePDA] = deriveEntityRolePDA(insurerPubkey);
     const [claimPDA] = deriveClaimPDA(invoicePDA, insurerPubkey);
 
-    const ix = await (program.methods as any)
-      .insurerDecideClaim(approve, reasonCode)
-      .accounts({
-        admin: admin.publicKey,
-        insurer: insurerPubkey,
-        insurerRole: insurerRolePDA,
-        invoice: invoicePDA,
-        claim: claimPDA,
-      })
-      .transaction();
+    // insurer_decide_claim(approve: bool, reason_code: u16)
+    const data = Buffer.concat([
+      DISC.insurer_decide_claim,
+      writeBool(approve),
+      writeU16LE(reasonCode),
+    ]);
 
-    return buildPartialTx(ix);
+    const ix = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: admin.publicKey, isSigner: true,  isWritable: true  },
+        { pubkey: insurerPubkey,   isSigner: true,  isWritable: false },
+        { pubkey: insurerRolePDA,  isSigner: false, isWritable: false },
+        { pubkey: invoicePDA,      isSigner: false, isWritable: true  },
+        { pubkey: claimPDA,        isSigner: false, isWritable: true  },
+      ],
+      data,
+    });
+
+    const tx = new Transaction().add(ix);
+    return buildPartialTx(tx);
   } catch (err) {
     logger.error('[Solana] buildInsurerDecideClaimTx error', err);
     return null;
   }
 }
 
-// ── On-chain read operations ──────────────────────────────────────────────────
-
-export async function getEntityRole(
-  entityPubkey: PublicKey,
-): Promise<{ role: string; status: string; metadataHash: Uint8Array } | null> {
-  try {
-    const connection = getConnection();
-    const [pda] = deriveEntityRolePDA(entityPubkey);
-    const accountInfo = await connection.getAccountInfo(pda);
-    if (!accountInfo) return null;
-
-    const data = accountInfo.data.slice(8);
-    const roleMap: Record<number, string> = {
-      0: 'hospital', 1: 'insurer', 2: 'doctor', 3: 'pharmacist',
-    };
-    const statusMap: Record<number, string> = {
-      0: 'pending', 1: 'approved', 2: 'revoked',
-    };
-
-    return {
-      role:         roleMap[data[0]] ?? 'unknown',
-      status:       statusMap[data[1]] ?? 'unknown',
-      metadataHash: data.slice(2, 34),
-    };
-  } catch (err) {
-    logger.error('getEntityRole error', err);
-    return null;
-  }
-}
+// ── Read helpers ──────────────────────────────────────────────────────────────
 
 export async function isEntityApproved(pubkeyStr: string): Promise<boolean> {
   try {
     const pubkey = new PublicKey(pubkeyStr);
-    const entity = await getEntityRole(pubkey);
-    return entity?.status === 'approved';
+    const [rolePDA] = deriveEntityRolePDA(pubkey);
+    const info = await getConnection().getAccountInfo(rolePDA);
+    if (!info || info.data.length < 10) return false;
+    // EntityStatus is at offset 8 (discriminator) + 32 (entity pubkey) + 4 (role enum) = 44
+    // status: 0=Pending, 1=Approved, 2=Revoked
+    const status = info.data[44];
+    return status === 1;
   } catch {
     return false;
   }

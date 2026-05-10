@@ -8,7 +8,7 @@ import { AppError } from '../middleware/error';
 import { authenticate } from '../middleware/auth';
 import type { JwtPayload } from '../middleware/auth';
 import { logger } from '../logger';
-import { ensureEntityApproved } from '../services/solana.service';
+import { registerEntity, approveEntity } from '../services/solana.service';
 
 const router = Router();
 
@@ -20,7 +20,7 @@ const loginSchema = z.object({
     z.string().email('Adresse e-mail invalide'),
   ),
   password: z.string().min(1, 'Mot de passe requis'),
-  solana_public_key: z.string().min(32, 'Clé publique Solana requise'),
+  solana_public_key: z.string().optional().default(''),
 });
 
 const changePasswordSchema = z.object({
@@ -60,14 +60,8 @@ router.post('/login', async (req, res) => {
     throw new AppError(401, 'Email ou mot de passe incorrect');
   }
 
-  // Update solana pubkey if changed (key rotation on password change)
-  if (user.solana_public_key !== body.solana_public_key) {
-    const metadataHash = crypto
-      .createHash('sha256')
-      .update(`${user.id}:${user.role}:${user.email}`)
-      .digest();
-
-    await ensureEntityApproved(body.solana_public_key, user.role, metadataHash);
+  // Update solana pubkey if changed
+  if (body.solana_public_key && user.solana_public_key !== body.solana_public_key) {
     await query(
       'UPDATE users SET solana_public_key = $1, updated_at = NOW() WHERE id = $2',
       [body.solana_public_key, user.id],
@@ -126,16 +120,6 @@ router.post('/change-password', authenticate, async (req, res) => {
     throw new AppError(404, 'Utilisateur introuvable');
   }
 
-  const metadataHash = crypto
-    .createHash('sha256')
-    .update(`${currentUser.id}:${currentUser.role}:${currentUser.email}`)
-    .digest();
-  await ensureEntityApproved(
-    body.new_solana_public_key,
-    currentUser.role,
-    metadataHash,
-  );
-
   const newHash = await bcrypt.hash(body.new_password, 12);
   await query(
     `UPDATE users
@@ -153,6 +137,16 @@ router.post('/change-password', authenticate, async (req, res) => {
     role: currentUser.role,
     solanaPublicKey: body.new_solana_public_key,
   };
+
+  // Enregistrer l'entité on-chain après changement de mot de passe
+  if (body.new_solana_public_key) {
+    const metadataHash = crypto
+      .createHash('sha256')
+      .update(`${currentUser.id}:${currentUser.role}:${currentUser.email}`)
+      .digest();
+    await registerEntity(body.new_solana_public_key, currentUser.role, metadataHash);
+    await approveEntity(body.new_solana_public_key);
+  }
 
   res.json({
     ...makeTokenPair(payload),
