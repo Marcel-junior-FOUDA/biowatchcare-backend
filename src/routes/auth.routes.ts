@@ -13,8 +13,11 @@ const router = Router();
 // ── Schémas de validation ────────────────────────────────────────────────────
 
 const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
+  email: z.preprocess(
+    (v) => (typeof v === 'string' ? v.trim().toLowerCase() : v),
+    z.string().email('Adresse e-mail invalide'),
+  ),
+  password: z.string().min(1, 'Mot de passe requis'),
   solana_public_key: z.string().optional().default(''),
 });
 
@@ -31,6 +34,10 @@ const refreshSchema = z.object({
 // ── POST /auth/login ─────────────────────────────────────────────────────────
 
 router.post('/login', async (req, res) => {
+  logger.debug('POST /auth/login body', {
+    contentType: req.get('Content-Type'),
+    body: req.body,
+  });
   const body = loginSchema.parse(req.body);
 
   const user = await queryOne<{

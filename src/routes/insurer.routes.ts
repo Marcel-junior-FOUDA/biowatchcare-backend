@@ -60,11 +60,16 @@ router.get('/patients', async (req, res) => {
 
 // ── POST /insurer/patients ───────────────────────────────────────────────────
 
+const emailField = z.preprocess(
+  (v) => (typeof v === 'string' ? v.trim().toLowerCase() : v),
+  z.string().email('Adresse e-mail invalide'),
+);
+
 const createPatientSchema = z.object({
   full_name: z.string().min(2),
   date_of_birth: z.string(),
   phone: z.string(),
-  email: z.string().email(),
+  email: emailField,
   temp_password: z.string().min(8),
   contract_type: z.enum(['Individuel', 'Familial', 'Entreprise']),
 });

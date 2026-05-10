@@ -19,6 +19,7 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   }
 
   if (err instanceof ZodError) {
+    logger.warn('ZodError', { errors: err.errors });
     res.status(400).json({
       error: 'Validation échouée',
       details: err.errors.map((e) => ({

@@ -66,8 +66,13 @@ router.post('/hospitals', async (req, res) => {
 
 // ── POST /super-admin/hospitals/:id/admin ─────────────────────────────────────
 
+const emailField = z.preprocess(
+  (v) => (typeof v === 'string' ? v.trim().toLowerCase() : v),
+  z.string().email('Adresse e-mail invalide'),
+);
+
 const createAdminSchema = z.object({
-  email: z.string().email(),
+  email: emailField,
   display_name: z.string().min(2),
   temp_password: z.string().min(8),
 });

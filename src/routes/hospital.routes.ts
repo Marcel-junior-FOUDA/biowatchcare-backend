@@ -26,8 +26,13 @@ router.get('/staff', async (req, res) => {
 
 // ── POST /hospital/staff ──────────────────────────────────────────────────────
 
+const emailField = z.preprocess(
+  (v) => (typeof v === 'string' ? v.trim().toLowerCase() : v),
+  z.string().email('Adresse e-mail invalide'),
+);
+
 const createStaffSchema = z.object({
-  email: z.string().email(),
+  email: emailField,
   role: z.enum(['doctor', 'pharmacist', 'insurer']),
   display_name: z.string().min(2),
   temp_password: z.string().min(8),
@@ -133,7 +138,7 @@ const createPatientHospitalSchema = z.object({
   full_name: z.string().min(2),
   date_of_birth: z.string(),
   phone: z.string(),
-  email: z.string().email(),
+  email: emailField,
   temp_password: z.string().min(8),
 });
 
