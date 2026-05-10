@@ -1,10 +1,17 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'crypto';
+import { PublicKey } from '@solana/web3.js';
 import { query, queryOne } from '../db';
 import { authenticate, requireRole } from '../middleware/auth';
 import { AppError } from '../middleware/error';
 import { logger } from '../logger';
+import {
+  buildAddPrescriptionTx,
+  buildIssueQrTokenTx,
+  derivePatientProfilePDA,
+  derivePrescriptionPDA,
+} from '../services/solana.service';
 
 const router = Router();
 router.use(authenticate, requireRole('doctor', 'super_admin'));
@@ -90,10 +97,16 @@ router.post('/prescriptions', async (req, res) => {
   const doctorId = req.user!.sub;
   const body = createRxSchema.parse(req.body);
 
-  const rxHash = crypto
+  const rxHashBuf = crypto
     .createHash('sha256')
     .update(`${body.patient_id}:${body.medication_pointer_hash}:${Date.now()}`)
-    .digest('hex');
+    .digest();
+  const rxHash = rxHashBuf.toString('hex');
+
+  const pointerHashBuf = Buffer.from(
+    body.medication_pointer_hash.padEnd(64, '0').slice(0, 64),
+    'hex',
+  );
 
   const [rx] = await query<{ id: string }>(
     `INSERT INTO prescriptions (patient_id, doctor_id, rx_hash, pointer_hash, status)
@@ -102,7 +115,35 @@ router.post('/prescriptions', async (req, res) => {
     [body.patient_id, doctorId, rxHash, body.medication_pointer_hash],
   );
 
-  res.status(201).json({ id: rx!.id, rx_hash: rxHash, status: 'active' });
+  // Construire la tx partielle Solana — Flutter co-signe avec la clé du médecin
+  const [doctorRow, patientRow] = await Promise.all([
+    queryOne<{ solana_public_key: string }>(
+      'SELECT solana_public_key FROM users WHERE id = $1',
+      [doctorId],
+    ),
+    queryOne<{ patient_id_hash: string }>(
+      'SELECT patient_id_hash FROM patients WHERE id = $1',
+      [body.patient_id],
+    ),
+  ]);
+
+  let solanaPartialTx: string | null = null;
+  if (doctorRow?.solana_public_key && patientRow?.patient_id_hash) {
+    const patientIdHash = Buffer.from(patientRow.patient_id_hash, 'hex');
+    solanaPartialTx = await buildAddPrescriptionTx(
+      patientIdHash,
+      rxHashBuf,
+      pointerHashBuf,
+      doctorRow.solana_public_key,
+    );
+  }
+
+  res.status(201).json({
+    id: rx!.id,
+    rx_hash: rxHash,
+    status: 'active',
+    ...(solanaPartialTx ? { solana_partial_tx: solanaPartialTx } : {}),
+  });
 });
 
 // ── POST /doctor/prescriptions/:rxId/qr ──────────────────────────────────────
@@ -119,7 +160,8 @@ router.post('/prescriptions/:rxId/qr', async (req, res) => {
   if (rx.doctor_id !== doctorId) throw new AppError(403, 'Accès refusé');
   if (rx.status !== 'active') throw new AppError(409, 'Ordonnance non active');
 
-  const tokenHash = crypto.randomBytes(32).toString('hex');
+  const tokenHashBuf = crypto.randomBytes(32);
+  const tokenHash = tokenHashBuf.toString('hex');
   const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
 
   const [qr] = await query<{ id: string }>(
@@ -129,10 +171,43 @@ router.post('/prescriptions/:rxId/qr', async (req, res) => {
     [rxId, tokenHash, expiresAt],
   );
 
+  // Construire la tx partielle Solana pour issue_qr_token
+  const [doctorRow, rxRow] = await Promise.all([
+    queryOne<{ solana_public_key: string }>(
+      'SELECT solana_public_key FROM users WHERE id = $1',
+      [doctorId],
+    ),
+    queryOne<{ rx_hash: string; patient_id: string }>(
+      'SELECT rx_hash, patient_id FROM prescriptions WHERE id = $1',
+      [rxId],
+    ),
+  ]);
+
+  let solanaPartialTx: string | null = null;
+  if (doctorRow?.solana_public_key && rxRow) {
+    const patientRow = await queryOne<{ patient_id_hash: string }>(
+      'SELECT patient_id_hash FROM patients WHERE id = $1',
+      [rxRow.patient_id],
+    );
+    if (patientRow?.patient_id_hash) {
+      const patientIdHash = Buffer.from(patientRow.patient_id_hash, 'hex');
+      const rxHashBuf = Buffer.from(rxRow.rx_hash, 'hex');
+      const [patientPDA] = derivePatientProfilePDA(patientIdHash);
+      const [prescriptionPDA] = derivePrescriptionPDA(patientPDA, rxHashBuf);
+
+      solanaPartialTx = await buildIssueQrTokenTx(
+        prescriptionPDA,
+        tokenHashBuf,
+        doctorRow.solana_public_key,
+      );
+    }
+  }
+
   res.status(201).json({
     id: qr!.id,
     token_hash: tokenHash,
     expires_at: expiresAt.toISOString(),
+    ...(solanaPartialTx ? { solana_partial_tx: solanaPartialTx } : {}),
   });
 });
 

@@ -1,8 +1,15 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import crypto from 'crypto';
 import { query, queryOne } from '../db';
 import { authenticate, requireRole } from '../middleware/auth';
 import { AppError } from '../middleware/error';
+import {
+  buildDispenseWithQrTx,
+  derivePatientProfilePDA,
+  derivePrescriptionPDA,
+  deriveQrTokenPDA,
+} from '../services/solana.service';
 
 const router = Router();
 router.use(authenticate, requireRole('pharmacist', 'super_admin'));
@@ -105,10 +112,13 @@ router.post('/qr/dispense', async (req, res) => {
     [pharmacistId, qr.id],
   );
 
+  const dispenseHashBuf = crypto.randomBytes(32);
+  const dispenseHash = dispenseHashBuf.toString('hex');
+
   await query(
-    `INSERT INTO dispenses (prescription_id, pharmacist_id, dispensed_at)
-     VALUES ($1, $2, NOW())`,
-    [qr.prescription_id, pharmacistId],
+    `INSERT INTO dispenses (prescription_id, pharmacist_id, dispensed_at, dispense_hash)
+     VALUES ($1, $2, NOW(), $3)`,
+    [qr.prescription_id, pharmacistId, dispenseHash],
   );
 
   await query(
@@ -117,8 +127,8 @@ router.post('/qr/dispense', async (req, res) => {
   );
 
   // Notifier le patient
-  const rx = await queryOne<{ patient_id: string }>(
-    'SELECT patient_id FROM prescriptions WHERE id = $1',
+  const rx = await queryOne<{ patient_id: string; rx_hash: string }>(
+    'SELECT patient_id, rx_hash FROM prescriptions WHERE id = $1',
     [qr.prescription_id],
   );
   if (rx) {
@@ -136,7 +146,37 @@ router.post('/qr/dispense', async (req, res) => {
     }
   }
 
-  res.json({ message: 'Médicament dispensé avec succès', prescription_id: qr.prescription_id });
+  // Build Solana partial tx for pharmacist co-signature
+  let solanaPartialTx: string | null = null;
+  const pharmacistRow = await queryOne<{ solana_public_key: string }>(
+    'SELECT solana_public_key FROM users WHERE id = $1',
+    [pharmacistId],
+  );
+  if (rx && pharmacistRow?.solana_public_key) {
+    const patientRow = await queryOne<{ patient_id_hash: string }>(
+      'SELECT patient_id_hash FROM patients WHERE id = $1',
+      [rx.patient_id],
+    );
+    if (patientRow?.patient_id_hash) {
+      const patientIdHash = Buffer.from(patientRow.patient_id_hash, 'hex');
+      const rxHashBuf = Buffer.from(rx.rx_hash, 'hex');
+      const [patientPDA] = derivePatientProfilePDA(patientIdHash);
+      const [prescriptionPDA] = derivePrescriptionPDA(patientPDA, rxHashBuf);
+      const [qrTokenPDA] = deriveQrTokenPDA(prescriptionPDA, Buffer.from(body.token_hash, 'hex'));
+      solanaPartialTx = await buildDispenseWithQrTx(
+        qrTokenPDA,
+        dispenseHashBuf,
+        pharmacistRow.solana_public_key,
+      );
+    }
+  }
+
+  res.json({
+    message: 'Médicament dispensé avec succès',
+    prescription_id: qr.prescription_id,
+    dispense_hash: dispenseHash,
+    ...(solanaPartialTx ? { solana_partial_tx: solanaPartialTx } : {}),
+  });
 });
 
 // ── GET /pharmacist/dispenses ─────────────────────────────────────────────────

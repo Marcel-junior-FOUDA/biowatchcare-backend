@@ -5,6 +5,13 @@ import { query, queryOne } from '../db';
 import { authenticate, requireRole } from '../middleware/auth';
 import { AppError } from '../middleware/error';
 import { config } from '../config';
+import {
+  buildCreatePatientProfileTx,
+  buildCreateInvoiceTx,
+  buildAutoOrPendingClaimTx,
+  derivePatientProfilePDA,
+  deriveInvoicePDA,
+} from '../services/solana.service';
 
 const router = Router();
 router.use(authenticate, requireRole('hospital_admin', 'super_admin'));
@@ -202,6 +209,21 @@ router.post('/patients', async (req, res) => {
     [admin.hospital_id, patient!.id],
   );
 
+  // Créer le profil patient on-chain — tx partielle pour co-signature Flutter
+  const staffUser = await queryOne<{ solana_public_key: string }>(
+    'SELECT solana_public_key FROM users WHERE id = $1',
+    [userId],
+  );
+  const patientIdHash = crypto.createHash('sha256').update(patient!.id).digest();
+  await query(
+    'UPDATE patients SET patient_id_hash = $1 WHERE id = $2',
+    [patientIdHash.toString('hex'), patient!.id],
+  );
+  const solanaPartialTx = await buildCreatePatientProfileTx(
+    patientIdHash,
+    staffUser?.solana_public_key ?? '',
+  );
+
   res.status(201).json({
     id: user!.id,
     patient_id: patient!.id,
@@ -209,6 +231,7 @@ router.post('/patients', async (req, res) => {
     email: body.email,
     full_name: body.full_name,
     is_first_login: true,
+    ...(solanaPartialTx ? { solana_partial_tx: solanaPartialTx } : {}),
   });
 });
 
@@ -225,15 +248,16 @@ router.post('/invoices', async (req, res) => {
   const hospitalId = req.user!.sub;
   const body = createInvoiceSchema.parse(req.body);
 
-  const hospital = await queryOne<{ hospital_id: string }>(
-    'SELECT hospital_id FROM users WHERE id = $1',
+  const hospital = await queryOne<{ hospital_id: string; solana_public_key: string }>(
+    'SELECT hospital_id, solana_public_key FROM users WHERE id = $1',
     [hospitalId],
   );
 
-  const invoiceHash = crypto
+  const invoiceHashBuf = crypto
     .createHash('sha256')
     .update(`${body.patient_id}:${body.amount}:${Date.now()}`)
-    .digest('hex');
+    .digest();
+  const invoiceHash = invoiceHashBuf.toString('hex');
 
   const isAutoApproved =
     body.amount <= config.autoReimbThreshold && body.documents_provided;
@@ -255,11 +279,54 @@ router.post('/invoices', async (req, res) => {
     ],
   );
 
+  // Construire les tx Solana partielles — Flutter co-signe et broadcast
+  const patient = await queryOne<{ patient_id_hash: string; solana_public_key: string }>(
+    'SELECT patient_id_hash, solana_public_key FROM patients WHERE id = $1',
+    [body.patient_id],
+  );
+
+  let invoiceSolanaPartialTx: string | null = null;
+  let claimSolanaPartialTx: string | null = null;
+
+  if (patient?.patient_id_hash && hospital?.solana_public_key) {
+    const patientIdHash = Buffer.from(patient.patient_id_hash, 'hex');
+    const [patientPDA] = derivePatientProfilePDA(patientIdHash);
+    const [invoicePDA] = deriveInvoicePDA(patientPDA, invoiceHashBuf);
+
+    invoiceSolanaPartialTx = await buildCreateInvoiceTx(
+      patientIdHash,
+      invoiceHashBuf,
+      body.amount,
+      body.currency_code,
+      hospital.solana_public_key,
+    );
+
+    // Si l'assureur du patient est connu, créer aussi la claim
+    const insurerLink = await queryOne<{ insurer_id: string; solana_public_key: string }>(
+      `SELECT ip.insurer_id, u.solana_public_key
+       FROM insurer_patients ip
+       JOIN users u ON u.id = ip.insurer_id
+       WHERE ip.patient_id = $1 AND ip.active = true
+       LIMIT 1`,
+      [body.patient_id],
+    );
+
+    if (insurerLink?.solana_public_key) {
+      claimSolanaPartialTx = await buildAutoOrPendingClaimTx(
+        invoicePDA,
+        insurerLink.solana_public_key,
+        hospital.solana_public_key,
+      );
+    }
+  }
+
   res.status(201).json({
     id: invoice!.id,
     invoice_hash: invoiceHash,
     status,
     is_auto_approved: isAutoApproved,
+    ...(invoiceSolanaPartialTx ? { solana_invoice_partial_tx: invoiceSolanaPartialTx } : {}),
+    ...(claimSolanaPartialTx   ? { solana_claim_partial_tx: claimSolanaPartialTx }   : {}),
   });
 });
 

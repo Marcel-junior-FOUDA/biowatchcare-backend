@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { z } from 'zod';
 import { query, queryOne } from '../db';
 import { makeTokenPair, verifyRefreshToken } from '../services/token.service';
@@ -7,6 +8,7 @@ import { AppError } from '../middleware/error';
 import { authenticate } from '../middleware/auth';
 import type { JwtPayload } from '../middleware/auth';
 import { logger } from '../logger';
+import { registerEntity, approveEntity } from '../services/solana.service';
 
 const router = Router();
 
@@ -125,6 +127,19 @@ router.post('/change-password', authenticate, async (req, res) => {
     'SELECT id, email, role, display_name, hospital_id FROM users WHERE id = $1',
     [userId],
   );
+
+  // Enregistrer l'entité on-chain si la clé publique est fournie
+  // Le smart contract requiert admin + entité comme signataires.
+  // On envoie register_entity (admin-only) puis approve_entity immédiatement.
+  if (body.new_solana_public_key) {
+    const metadataHash = crypto
+      .createHash('sha256')
+      .update(`${updatedUser!.id}:${updatedUser!.role}:${updatedUser!.email}`)
+      .digest();
+
+    await registerEntity(body.new_solana_public_key, updatedUser!.role, metadataHash);
+    await approveEntity(body.new_solana_public_key);
+  }
 
   const payload: JwtPayload = {
     sub: updatedUser!.id,

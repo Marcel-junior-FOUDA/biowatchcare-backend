@@ -1,10 +1,17 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import crypto from 'crypto';
 import { query, queryOne } from '../db';
 import { authenticate, requireRole } from '../middleware/auth';
 import { AppError } from '../middleware/error';
 import { logger } from '../logger';
 import { config } from '../config';
+import {
+  buildCreatePatientProfileTx,
+  buildInsurerDecideClaimTx,
+  deriveInvoicePDA,
+  derivePatientProfilePDA,
+} from '../services/solana.service';
 
 const router = Router();
 router.use(authenticate, requireRole('insurer', 'super_admin'));
@@ -134,6 +141,23 @@ router.post('/patients', async (req, res) => {
     [insurerId, patient!.id, body.contract_type],
   );
 
+  // Compute and store patient_id_hash for on-chain PDA derivation
+  const patientIdHash = crypto.createHash('sha256').update(patient!.id).digest();
+  await query(
+    'UPDATE patients SET patient_id_hash = $1 WHERE id = $2',
+    [patientIdHash.toString('hex'), patient!.id],
+  );
+
+  // Build Solana partial tx for insurer co-signature
+  const insurerRow = await queryOne<{ solana_public_key: string }>(
+    'SELECT solana_public_key FROM users WHERE id = $1',
+    [insurerId],
+  );
+  const solanaPartialTx = await buildCreatePatientProfileTx(
+    patientIdHash,
+    insurerRow?.solana_public_key ?? '',
+  );
+
   res.status(201).json({
     id: user!.id,
     patient_id: patient!.id,
@@ -141,6 +165,7 @@ router.post('/patients', async (req, res) => {
     email: body.email,
     full_name: body.full_name,
     is_first_login: true,
+    ...(solanaPartialTx ? { solana_partial_tx: solanaPartialTx } : {}),
   });
 });
 
@@ -181,8 +206,11 @@ router.post('/claims/:claimId/decide', async (req, res) => {
     invoice_id: string;
     amount: number;
     documents_provided: boolean;
+    invoice_hash: string;
+    patient_id: string;
   }>(
-    `SELECT c.id, c.status, c.invoice_id, i.amount, i.documents_provided
+    `SELECT c.id, c.status, c.invoice_id, i.amount, i.documents_provided,
+            i.invoice_hash, i.patient_id
      FROM claims c
      JOIN invoices i ON i.id = c.invoice_id
      WHERE c.id = $1 AND c.insurer_id = $2`,
@@ -205,7 +233,35 @@ router.post('/claims/:claimId/decide', async (req, res) => {
     `Claim ${claimId} ${body.decision} par assureur ${insurerId} via ${body.payment_method}`,
   );
 
-  res.json({ message: `Réclamation ${body.decision === 'approved' ? 'approuvée' : 'rejetée'}` });
+  // Build Solana partial tx for insurer co-signature
+  let solanaPartialTx: string | null = null;
+  const insurerRow = await queryOne<{ solana_public_key: string }>(
+    'SELECT solana_public_key FROM users WHERE id = $1',
+    [insurerId],
+  );
+  if (insurerRow?.solana_public_key && claim.invoice_hash) {
+    const patientRow = await queryOne<{ patient_id_hash: string }>(
+      'SELECT patient_id_hash FROM patients WHERE id = $1',
+      [claim.patient_id],
+    );
+    if (patientRow?.patient_id_hash) {
+      const patientIdHash = Buffer.from(patientRow.patient_id_hash, 'hex');
+      const invoiceHashBuf = Buffer.from(claim.invoice_hash, 'hex');
+      const [patientPDA] = derivePatientProfilePDA(patientIdHash);
+      const [invoicePDA] = deriveInvoicePDA(patientPDA, invoiceHashBuf);
+      solanaPartialTx = await buildInsurerDecideClaimTx(
+        invoicePDA,
+        insurerRow.solana_public_key,
+        body.decision === 'approved',
+        body.reason_code ?? 0,
+      );
+    }
+  }
+
+  res.json({
+    message: `Réclamation ${body.decision === 'approved' ? 'approuvée' : 'rejetée'}`,
+    ...(solanaPartialTx ? { solana_partial_tx: solanaPartialTx } : {}),
+  });
 });
 
 // ── GET /insurer/claims ───────────────────────────────────────────────────────

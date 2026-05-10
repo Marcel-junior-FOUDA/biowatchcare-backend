@@ -1,0 +1,330 @@
+{
+  "address": "FhXSGiUzcvtAVqXM8tyy1HzUf4mFxkUQEvwgmjLRgow3",
+  "metadata": { "name": "biowatchcare", "version": "0.1.0", "spec": "0.1.0" },
+  "instructions": [
+    {
+      "name": "initialize_config",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "config", "writable": true, "pda": { "seeds": [{ "kind": "const", "value": [99,111,110,102,105,103] }] } },
+        { "name": "system_program" }
+      ],
+      "args": [{ "name": "threshold", "type": { "option": "u64" } }]
+    },
+    {
+      "name": "set_threshold",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "config", "writable": true, "pda": { "seeds": [{ "kind": "const", "value": [99,111,110,102,105,103] }] } }
+      ],
+      "args": [{ "name": "new_threshold", "type": "u64" }]
+    },
+    {
+      "name": "register_entity",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "config", "pda": { "seeds": [{ "kind": "const", "value": [99,111,110,102,105,103] }] } },
+        { "name": "role_account", "writable": true },
+        { "name": "system_program" }
+      ],
+      "args": [
+        { "name": "role", "type": { "defined": { "name": "Role" } } },
+        { "name": "entity_pubkey", "type": "pubkey" },
+        { "name": "metadata_hash", "type": { "array": ["u8", 32] } }
+      ]
+    },
+    {
+      "name": "approve_entity",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "config", "pda": { "seeds": [{ "kind": "const", "value": [99,111,110,102,105,103] }] } },
+        { "name": "role_account", "writable": true }
+      ],
+      "args": []
+    },
+    {
+      "name": "revoke_entity",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "config", "pda": { "seeds": [{ "kind": "const", "value": [99,111,110,102,105,103] }] } },
+        { "name": "role_account", "writable": true }
+      ],
+      "args": []
+    },
+    {
+      "name": "create_patient_profile",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "staff", "signer": true },
+        { "name": "config" },
+        { "name": "staff_role" },
+        { "name": "patient", "writable": true },
+        { "name": "system_program" }
+      ],
+      "args": [{ "name": "patient_id_hash", "type": { "array": ["u8", 32] } }]
+    },
+    {
+      "name": "create_invoice",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "hospital", "signer": true },
+        { "name": "hospital_role" },
+        { "name": "patient" },
+        { "name": "invoice", "writable": true },
+        { "name": "system_program" }
+      ],
+      "args": [
+        { "name": "patient_id_hash", "type": { "array": ["u8", 32] } },
+        { "name": "invoice_hash", "type": { "array": ["u8", 32] } },
+        { "name": "amount", "type": "u64" },
+        { "name": "currency_code", "type": { "array": ["u8", 3] } }
+      ]
+    },
+    {
+      "name": "auto_or_pending_claim",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "hospital", "signer": true },
+        { "name": "hospital_role" },
+        { "name": "config" },
+        { "name": "invoice", "writable": true },
+        { "name": "claim", "writable": true },
+        { "name": "insurer" },
+        { "name": "system_program" }
+      ],
+      "args": [{ "name": "insurer", "type": "pubkey" }]
+    },
+    {
+      "name": "insurer_decide_claim",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "insurer", "signer": true },
+        { "name": "insurer_role" },
+        { "name": "invoice", "writable": true },
+        { "name": "claim", "writable": true }
+      ],
+      "args": [
+        { "name": "approve", "type": "bool" },
+        { "name": "reason_code", "type": "u16" }
+      ]
+    },
+    {
+      "name": "add_prescription",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "doctor", "signer": true },
+        { "name": "doctor_role" },
+        { "name": "patient" },
+        { "name": "prescription", "writable": true },
+        { "name": "system_program" }
+      ],
+      "args": [
+        { "name": "patient_id_hash", "type": { "array": ["u8", 32] } },
+        { "name": "rx_hash", "type": { "array": ["u8", 32] } },
+        { "name": "pointer_hash", "type": { "array": ["u8", 32] } }
+      ]
+    },
+    {
+      "name": "cancel_prescription",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "doctor", "signer": true },
+        { "name": "doctor_role" },
+        { "name": "prescription", "writable": true }
+      ],
+      "args": []
+    },
+    {
+      "name": "issue_qr_token",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "doctor", "signer": true },
+        { "name": "doctor_role" },
+        { "name": "prescription", "writable": true },
+        { "name": "qr_token", "writable": true },
+        { "name": "system_program" }
+      ],
+      "args": [{ "name": "token_hash", "type": { "array": ["u8", 32] } }]
+    },
+    {
+      "name": "verify_qr_token",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "pharmacist", "signer": true },
+        { "name": "pharmacist_role" },
+        { "name": "qr_token" }
+      ],
+      "args": []
+    },
+    {
+      "name": "dispense_with_qr",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "pharmacist", "signer": true },
+        { "name": "pharmacist_role" },
+        { "name": "qr_token", "writable": true },
+        { "name": "dispense", "writable": true },
+        { "name": "system_program" }
+      ],
+      "args": [{ "name": "dispense_hash", "type": { "array": ["u8", 32] } }]
+    },
+    {
+      "name": "grant_consent",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "patient_signer", "signer": true },
+        { "name": "patient" },
+        { "name": "consent", "writable": true },
+        { "name": "system_program" }
+      ],
+      "args": [
+        { "name": "patient_id_hash", "type": { "array": ["u8", 32] } },
+        { "name": "grantee_pubkey", "type": "pubkey" },
+        { "name": "scopes", "type": "u32" },
+        { "name": "expires_at", "type": "i64" }
+      ]
+    },
+    {
+      "name": "revoke_consent",
+      "accounts": [
+        { "name": "admin", "writable": true, "signer": true },
+        { "name": "patient_signer", "signer": true },
+        { "name": "patient" },
+        { "name": "consent", "writable": true }
+      ],
+      "args": [
+        { "name": "patient_id_hash", "type": { "array": ["u8", 32] } },
+        { "name": "grantee_pubkey", "type": "pubkey" }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "GlobalConfig",
+      "discriminator": [1, 0, 0, 0, 0, 0, 0, 0],
+      "type": { "kind": "struct", "fields": [
+        { "name": "admin", "type": "pubkey" },
+        { "name": "auto_reimb_threshold", "type": "u64" },
+        { "name": "bump", "type": "u8" },
+        { "name": "created_at", "type": "i64" }
+      ]}
+    },
+    {
+      "name": "EntityRole",
+      "discriminator": [2, 0, 0, 0, 0, 0, 0, 0],
+      "type": { "kind": "struct", "fields": [
+        { "name": "entity", "type": "pubkey" },
+        { "name": "role", "type": { "defined": { "name": "Role" } } },
+        { "name": "status", "type": { "defined": { "name": "EntityStatus" } } },
+        { "name": "metadata_hash", "type": { "array": ["u8", 32] } },
+        { "name": "approved_by", "type": "pubkey" },
+        { "name": "updated_at", "type": "i64" },
+        { "name": "bump", "type": "u8" }
+      ]}
+    },
+    {
+      "name": "PatientProfile",
+      "discriminator": [3, 0, 0, 0, 0, 0, 0, 0],
+      "type": { "kind": "struct", "fields": [
+        { "name": "patient_id_hash", "type": { "array": ["u8", 32] } },
+        { "name": "status", "type": { "defined": { "name": "PatientStatus" } } },
+        { "name": "created_by", "type": "pubkey" },
+        { "name": "created_at", "type": "i64" },
+        { "name": "bump", "type": "u8" }
+      ]}
+    },
+    {
+      "name": "Prescription",
+      "discriminator": [4, 0, 0, 0, 0, 0, 0, 0],
+      "type": { "kind": "struct", "fields": [
+        { "name": "patient", "type": "pubkey" },
+        { "name": "rx_hash", "type": { "array": ["u8", 32] } },
+        { "name": "doctor", "type": "pubkey" },
+        { "name": "pointer_hash", "type": { "array": ["u8", 32] } },
+        { "name": "created_at", "type": "i64" },
+        { "name": "status", "type": { "defined": { "name": "RxStatus" } } },
+        { "name": "bump", "type": "u8" }
+      ]}
+    },
+    {
+      "name": "QrToken",
+      "discriminator": [5, 0, 0, 0, 0, 0, 0, 0],
+      "type": { "kind": "struct", "fields": [
+        { "name": "prescription", "type": "pubkey" },
+        { "name": "token_hash", "type": { "array": ["u8", 32] } },
+        { "name": "expires_at", "type": "i64" },
+        { "name": "used", "type": "bool" },
+        { "name": "used_at", "type": "i64" },
+        { "name": "used_by", "type": "pubkey" },
+        { "name": "bump", "type": "u8" }
+      ]}
+    },
+    {
+      "name": "Dispense",
+      "discriminator": [6, 0, 0, 0, 0, 0, 0, 0],
+      "type": { "kind": "struct", "fields": [
+        { "name": "prescription", "type": "pubkey" },
+        { "name": "pharmacist", "type": "pubkey" },
+        { "name": "dispense_hash", "type": { "array": ["u8", 32] } },
+        { "name": "created_at", "type": "i64" },
+        { "name": "bump", "type": "u8" }
+      ]}
+    },
+    {
+      "name": "Invoice",
+      "discriminator": [7, 0, 0, 0, 0, 0, 0, 0],
+      "type": { "kind": "struct", "fields": [
+        { "name": "patient", "type": "pubkey" },
+        { "name": "invoice_hash", "type": { "array": ["u8", 32] } },
+        { "name": "amount", "type": "u64" },
+        { "name": "currency_code", "type": { "array": ["u8", 3] } },
+        { "name": "created_at", "type": "i64" },
+        { "name": "bump", "type": "u8" }
+      ]}
+    },
+    {
+      "name": "ClaimStatus",
+      "discriminator": [8, 0, 0, 0, 0, 0, 0, 0],
+      "type": { "kind": "struct", "fields": [
+        { "name": "invoice", "type": "pubkey" },
+        { "name": "insurer", "type": "pubkey" },
+        { "name": "status", "type": { "defined": { "name": "ClaimDecision" } } },
+        { "name": "decided_at", "type": "i64" },
+        { "name": "reason_code", "type": "u16" },
+        { "name": "bump", "type": "u8" }
+      ]}
+    }
+  ],
+  "types": [
+    {
+      "name": "Role",
+      "type": { "kind": "enum", "variants": [
+        { "name": "Hospital" }, { "name": "Insurer" },
+        { "name": "Doctor" },  { "name": "Pharmacist" }
+      ]}
+    },
+    {
+      "name": "EntityStatus",
+      "type": { "kind": "enum", "variants": [
+        { "name": "Pending" }, { "name": "Approved" }, { "name": "Revoked" }
+      ]}
+    },
+    {
+      "name": "PatientStatus",
+      "type": { "kind": "enum", "variants": [{ "name": "Active" }] }
+    },
+    {
+      "name": "RxStatus",
+      "type": { "kind": "enum", "variants": [
+        { "name": "Active" }, { "name": "Cancelled" }
+      ]}
+    },
+    {
+      "name": "ClaimDecision",
+      "type": { "kind": "enum", "variants": [
+        { "name": "AutoApproved" }, { "name": "Pending" },
+        { "name": "Approved" },    { "name": "Rejected" }
+      ]}
+    }
+  ]
+}
