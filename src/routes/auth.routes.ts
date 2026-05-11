@@ -8,12 +8,7 @@ import { AppError } from '../middleware/error';
 import { authenticate } from '../middleware/auth';
 import type { JwtPayload } from '../middleware/auth';
 import { logger } from '../logger';
-import {
-  approveEntity,
-  getEntityOnChainState,
-  registerEntity,
-  SolanaWriteError,
-} from '../services/solana.service';
+import { approveEntity, registerEntity } from '../services/solana.service';
 
 const router = Router();
 
@@ -141,36 +136,20 @@ router.post('/change-password', authenticate, async (req, res) => {
     );
   }
 
-  if (body.new_solana_public_key) {
+  // Enregistrement on-chain en arrière-plan — ne bloque jamais le changement de mot de passe.
+  // Les patients n'ont pas de rôle Solana (pas d'entité on-chain).
+  const SOLANA_ROLES = new Set(['hospital_admin', 'doctor', 'pharmacist', 'insurer']);
+  if (body.new_solana_public_key && SOLANA_ROLES.has(currentUser.role)) {
     const metadataHash = crypto
       .createHash('sha256')
       .update(`${currentUser.id}:${currentUser.role}:${currentUser.email}`)
       .digest();
-
-    try {
-      const existingState = await getEntityOnChainState(body.new_solana_public_key);
-      logger.info(
-        `[Auth] change-password on-chain precheck user=${currentUser.email} pubkey=${body.new_solana_public_key} status=${existingState.status} rolePda=${existingState.rolePda}`,
-      );
-
-      await registerEntity(body.new_solana_public_key, currentUser.role, metadataHash);
-      await approveEntity(body.new_solana_public_key);
-    } catch (err) {
-      if (err instanceof SolanaWriteError) {
-        logger.error(
-          `[Auth] change-password on-chain sync failed user=${currentUser.email} pubkey=${body.new_solana_public_key} details=${err.details ?? 'n/a'}`,
-        );
-        throw new AppError(
-          502,
-          `Échec de synchronisation on-chain: ${err.message}`,
-          {
-            pubkey: body.new_solana_public_key,
-            details: err.details ?? null,
-          },
-        );
-      }
-      throw err;
-    }
+    registerEntity(body.new_solana_public_key, currentUser.role, metadataHash)
+      .then(() => approveEntity(body.new_solana_public_key))
+      .catch(err => logger.warn(
+        `[Solana] registerEntity/approveEntity ignoré pour ${currentUser.email}:`,
+        err?.message ?? err,
+      ));
   }
 
   const newHash = await bcrypt.hash(body.new_password, 12);
