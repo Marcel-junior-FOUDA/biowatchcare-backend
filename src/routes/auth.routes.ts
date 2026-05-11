@@ -2,13 +2,18 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { z } from 'zod';
-import { query, queryOne } from '../db';
+import { db, query, queryOne } from '../db';
 import { makeTokenPair, verifyRefreshToken } from '../services/token.service';
 import { AppError } from '../middleware/error';
 import { authenticate } from '../middleware/auth';
 import type { JwtPayload } from '../middleware/auth';
 import { logger } from '../logger';
-import { approveEntity, registerEntity } from '../services/solana.service';
+import {
+  approveEntity,
+  getEntityOnChainState,
+  registerEntity,
+  SolanaWriteError,
+} from '../services/solana.service';
 
 const router = Router();
 
@@ -112,12 +117,28 @@ router.post('/change-password', authenticate, async (req, res) => {
     role: string;
     display_name: string | null;
     hospital_id: string | null;
+    solana_public_key: string;
+    is_first_login: boolean;
   }>(
-    'SELECT id, email, role, display_name, hospital_id FROM users WHERE id = $1',
+    `SELECT id, email, role, display_name, hospital_id, solana_public_key, is_first_login
+     FROM users
+     WHERE id = $1`,
     [userId],
   );
   if (!currentUser) {
     throw new AppError(404, 'Utilisateur introuvable');
+  }
+
+  const duplicateUser = await queryOne<{ id: string; email: string }>(
+    'SELECT id, email FROM users WHERE solana_public_key = $1 AND id <> $2',
+    [body.new_solana_public_key, userId],
+  );
+  if (duplicateUser) {
+    throw new AppError(
+      409,
+      'Cette clé Solana est déjà associée à un autre utilisateur',
+      { email: duplicateUser.email },
+    );
   }
 
   if (body.new_solana_public_key) {
@@ -126,22 +147,59 @@ router.post('/change-password', authenticate, async (req, res) => {
       .update(`${currentUser.id}:${currentUser.role}:${currentUser.email}`)
       .digest();
 
-    // Fire-and-forget — l'enregistrement on-chain ne bloque pas le changement de mot de passe
-    registerEntity(body.new_solana_public_key, currentUser.role, metadataHash)
-      .then(() => approveEntity(body.new_solana_public_key))
-      .catch(err => logger.warn('[Solana] registerEntity/approveEntity ignoré:', err?.message ?? err));
+    try {
+      const existingState = await getEntityOnChainState(body.new_solana_public_key);
+      logger.info(
+        `[Auth] change-password on-chain precheck user=${currentUser.email} pubkey=${body.new_solana_public_key} status=${existingState.status} rolePda=${existingState.rolePda}`,
+      );
+
+      await registerEntity(body.new_solana_public_key, currentUser.role, metadataHash);
+      await approveEntity(body.new_solana_public_key);
+    } catch (err) {
+      if (err instanceof SolanaWriteError) {
+        logger.error(
+          `[Auth] change-password on-chain sync failed user=${currentUser.email} pubkey=${body.new_solana_public_key} details=${err.details ?? 'n/a'}`,
+        );
+        throw new AppError(
+          502,
+          `Échec de synchronisation on-chain: ${err.message}`,
+          {
+            pubkey: body.new_solana_public_key,
+            details: err.details ?? null,
+          },
+        );
+      }
+      throw err;
+    }
   }
 
   const newHash = await bcrypt.hash(body.new_password, 12);
-  await query(
-    `UPDATE users
-     SET password_hash = $1,
-         solana_public_key = $2,
-         is_first_login = false,
-         updated_at = NOW()
-     WHERE id = $3`,
-    [newHash, body.new_solana_public_key, userId],
-  );
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE users
+       SET password_hash = $1,
+           solana_public_key = $2,
+           is_first_login = false,
+           updated_at = NOW()
+       WHERE id = $3`,
+      [newHash, body.new_solana_public_key, userId],
+    );
+    await client.query('COMMIT');
+  } catch {
+    await client.query('ROLLBACK');
+    logger.error(
+      `[Auth] change-password SQL update failed after on-chain sync user=${currentUser.email} pubkey=${body.new_solana_public_key}`,
+    );
+    throw new AppError(
+      500,
+      'Synchronisation partielle: blockchain mise à jour mais persistance SQL échouée. Réessayez, l’opération on-chain est idempotente.',
+      { pubkey: body.new_solana_public_key },
+    );
+  } finally {
+    client.release();
+  }
 
   const payload: JwtPayload = {
     sub: currentUser.id,

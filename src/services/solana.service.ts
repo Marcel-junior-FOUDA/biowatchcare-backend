@@ -2,6 +2,7 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  SendTransactionError,
   Transaction,
   TransactionInstruction,
   SystemProgram,
@@ -74,11 +75,24 @@ function writeBool(b: boolean): Buffer {
 }
 
 export class SolanaWriteError extends Error {
-  constructor(message: string, public readonly cause?: unknown) {
+  constructor(
+    message: string,
+    public readonly cause?: unknown,
+    public readonly details?: string,
+  ) {
     super(message);
     this.name = 'SolanaWriteError';
   }
 }
+
+type EntityStatus = 'missing' | 'pending' | 'approved' | 'revoked';
+
+type EntityOnChainState = {
+  exists: boolean;
+  approved: boolean;
+  rolePda: string;
+  status: EntityStatus;
+};
 
 // Anchor serializes fieldless enums as a single u8 tag.
 function writeRoleVariant(role: string): Buffer {
@@ -122,6 +136,33 @@ function getAdminKeypair(): Keypair {
 
 export function isSolanaConfigured(): boolean {
   return config.solana.adminPrivateKey.length > 0;
+}
+
+function normalizeErrorDetails(err: unknown): string {
+  if (err instanceof SendTransactionError) {
+    const logs = Array.isArray(err.logs) && err.logs.length > 0
+      ? ` logs=${err.logs.join(' | ')}`
+      : '';
+    return `${err.message}${logs}`;
+  }
+
+  if (err instanceof Error) {
+    const cause = 'cause' in err
+      ? (err as Error & { cause?: unknown }).cause
+      : undefined;
+    const causeMessage = cause instanceof Error
+      ? ` cause=${cause.message}`
+      : typeof cause === 'string'
+        ? ` cause=${cause}`
+        : '';
+    return `${err.message}${causeMessage}`;
+  }
+
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
 }
 
 // ── PDA helpers ───────────────────────────────────────────────────────────────
@@ -266,6 +307,22 @@ export async function registerEntity(
     const entityPubkey = new PublicKey(entityPubkeyStr);
     const [configPDA] = deriveConfigPDA();
     const [rolePDA] = deriveEntityRolePDA(entityPubkey);
+    const existingState = await getEntityOnChainState(entityPubkeyStr);
+
+    if (existingState.status === 'revoked') {
+      throw new SolanaWriteError(
+        `Entité déjà enregistrée on-chain mais révoquée pour ${entityPubkeyStr}`,
+        undefined,
+        `rolePda=${existingState.rolePda} status=${existingState.status}`,
+      );
+    }
+
+    if (existingState.exists) {
+      logger.warn(
+        `[Solana] registerEntity ignoré — entité déjà présente ${entityPubkeyStr} rolePda=${existingState.rolePda} status=${existingState.status}`,
+      );
+      return `already-registered:${existingState.rolePda}`;
+    }
 
     // register_entity(role: Role, entity_pubkey: Pubkey, metadata_hash: [u8;32])
     const data = Buffer.concat([
@@ -291,10 +348,14 @@ export async function registerEntity(
     logger.info(`[Solana] registerEntity OK — ${entityPubkeyStr} sig=${sig}`);
     return sig;
   } catch (err) {
-    logger.error('[Solana] registerEntity error', err);
+    const details = err instanceof SolanaWriteError
+      ? err.details
+      : normalizeErrorDetails(err);
+    logger.error(`[Solana] registerEntity error — ${entityPubkeyStr} ${details ?? ''}`.trim());
     throw new SolanaWriteError(
       `Échec on-chain de registerEntity pour ${entityPubkeyStr}`,
       err,
+      details,
     );
   }
 }
@@ -312,6 +373,30 @@ export async function approveEntity(entityPubkeyStr: string): Promise<string> {
     const entityPubkey = new PublicKey(entityPubkeyStr);
     const [configPDA] = deriveConfigPDA();
     const [rolePDA] = deriveEntityRolePDA(entityPubkey);
+    const existingState = await getEntityOnChainState(entityPubkeyStr);
+
+    if (!existingState.exists) {
+      throw new SolanaWriteError(
+        `Entité absente on-chain pour approveEntity ${entityPubkeyStr}`,
+        undefined,
+        `rolePda=${existingState.rolePda} status=${existingState.status}`,
+      );
+    }
+
+    if (existingState.status === 'revoked') {
+      throw new SolanaWriteError(
+        `Entité révoquée on-chain pour approveEntity ${entityPubkeyStr}`,
+        undefined,
+        `rolePda=${existingState.rolePda} status=${existingState.status}`,
+      );
+    }
+
+    if (existingState.approved) {
+      logger.warn(
+        `[Solana] approveEntity ignoré — entité déjà approuvée ${entityPubkeyStr} rolePda=${existingState.rolePda}`,
+      );
+      return `already-approved:${existingState.rolePda}`;
+    }
 
     const ix = new TransactionInstruction({
       programId: PROGRAM_ID,
@@ -328,10 +413,14 @@ export async function approveEntity(entityPubkeyStr: string): Promise<string> {
     logger.info(`[Solana] approveEntity OK — ${entityPubkeyStr} sig=${sig}`);
     return sig;
   } catch (err) {
-    logger.error('[Solana] approveEntity error', err);
+    const details = err instanceof SolanaWriteError
+      ? err.details
+      : normalizeErrorDetails(err);
+    logger.error(`[Solana] approveEntity error — ${entityPubkeyStr} ${details ?? ''}`.trim());
     throw new SolanaWriteError(
       `Échec on-chain de approveEntity pour ${entityPubkeyStr}`,
       err,
+      details,
     );
   }
 }
@@ -652,17 +741,43 @@ export async function buildInsurerDecideClaimTx(
 
 // ── Read helpers ──────────────────────────────────────────────────────────────
 
-export async function isEntityApproved(pubkeyStr: string): Promise<boolean> {
+export async function getEntityOnChainState(pubkeyStr: string): Promise<EntityOnChainState> {
   try {
     const pubkey = new PublicKey(pubkeyStr);
     const [rolePDA] = deriveEntityRolePDA(pubkey);
     const info = await getConnection().getAccountInfo(rolePDA);
-    if (!info || info.data.length < 10) return false;
+    if (!info || info.data.length < 42) {
+      return {
+        exists: false,
+        approved: false,
+        rolePda: rolePDA.toBase58(),
+        status: 'missing',
+      };
+    }
     // EntityStatus is at offset 8 (discriminator) + 32 (entity pubkey) + 1 (role enum) = 41
     // status: 0=Pending, 1=Approved, 2=Revoked
     const status = info.data[41];
-    return status === 1;
+    const normalizedStatus: EntityStatus =
+      status === 1 ? 'approved' :
+      status === 2 ? 'revoked' :
+      'pending';
+    return {
+      exists: true,
+      approved: normalizedStatus === 'approved',
+      rolePda: rolePDA.toBase58(),
+      status: normalizedStatus,
+    };
   } catch {
-    return false;
+    return {
+      exists: false,
+      approved: false,
+      rolePda: '',
+      status: 'missing',
+    };
   }
+}
+
+export async function isEntityApproved(pubkeyStr: string): Promise<boolean> {
+  const state = await getEntityOnChainState(pubkeyStr);
+  return state.approved;
 }
