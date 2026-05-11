@@ -1,7 +1,10 @@
 import { Pool } from 'pg';
 import { config } from './config';
 
-export const db = new Pool({ connectionString: config.db.url });
+export const db = new Pool({
+  connectionString: config.db.url,
+  ssl: config.db.url.includes('supabase.com') ? { rejectUnauthorized: false } : false,
+});
 
 export async function query<T extends object = Record<string, unknown>>(
   sql: string,
