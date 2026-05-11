@@ -8,11 +8,7 @@ import { AppError } from '../middleware/error';
 import { authenticate } from '../middleware/auth';
 import type { JwtPayload } from '../middleware/auth';
 import { logger } from '../logger';
-import {
-  approveEntity,
-  registerEntity,
-  SolanaWriteError,
-} from '../services/solana.service';
+import { approveEntity, registerEntity } from '../services/solana.service';
 
 const router = Router();
 
@@ -130,18 +126,10 @@ router.post('/change-password', authenticate, async (req, res) => {
       .update(`${currentUser.id}:${currentUser.role}:${currentUser.email}`)
       .digest();
 
-    try {
-      await registerEntity(body.new_solana_public_key, currentUser.role, metadataHash);
-      await approveEntity(body.new_solana_public_key);
-    } catch (err) {
-      if (err instanceof SolanaWriteError) {
-        throw new AppError(
-          502,
-          `Échec de synchronisation on-chain: ${err.message}`,
-        );
-      }
-      throw err;
-    }
+    // Fire-and-forget — l'enregistrement on-chain ne bloque pas le changement de mot de passe
+    registerEntity(body.new_solana_public_key, currentUser.role, metadataHash)
+      .then(() => approveEntity(body.new_solana_public_key))
+      .catch(err => logger.warn('[Solana] registerEntity/approveEntity ignoré:', err?.message ?? err));
   }
 
   const newHash = await bcrypt.hash(body.new_password, 12);
