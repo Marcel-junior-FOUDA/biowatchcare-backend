@@ -29,6 +29,11 @@
     "winston": "^3.15.0",
     "zod": "^3.23.8"
   },
+  "overrides": {
+    "rpc-websockets": {
+      "uuid": "^9.0.0"
+    }
+  },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.17",
