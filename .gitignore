@@ -17,3 +17,7 @@ Thumbs.db
 .idea/
 .vscode/
 *.iml
+
+# Solana keypairs (secrets)
+.solana-admin-keypair.json
+*.keypair.json

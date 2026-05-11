@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import fs from 'fs';
 
-const DEFAULT_PROGRAM_ID = 'E7BWwRFQBYXmNqqAfNPYm1ccgWysJqtJrvUSq1NTnooX';
+const DEFAULT_PROGRAM_ID = 'E7BWwRFQBYXmNqqAfNPYm1ccgWysJqtJrvUSq1NTnooX'; // deployed on devnet
 
 function requiredEnv(key: string, errors: string[]): string {
   const value = process.env[key]?.trim();
