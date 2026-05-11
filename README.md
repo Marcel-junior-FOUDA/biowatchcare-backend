@@ -41,11 +41,13 @@ npm install
 
 ## Configuration
 
-Copier le fichier d'exemple et remplir les valeurs :
+Le fichier `.env.example` contient **toutes les valeurs partagées** prêtes à l'emploi (DB Supabase, JWT, Solana). Il suffit de le copier :
 
 ```bash
 cp .env.example .env
 ```
+
+Aucune modification nécessaire pour développer — tout pointe sur l'environnement cloud partagé de l'équipe.
 
 | Variable                  | Description                                              | Obligatoire |
 |---------------------------|----------------------------------------------------------|-------------|
@@ -66,7 +68,13 @@ cp .env.example .env
 
 ### Base de données partagée (dev)
 
-L'équipe utilise une instance Supabase partagée. Demande les credentials à un membre de l'équipe et place-les dans `DATABASE_URL`.
+L'équipe utilise une instance **Supabase cloud partagée**. Les credentials sont inclus dans `.env.example` — après `cp .env.example .env`, la connexion est immédiatement opérationnelle. Toutes les données créées (patients, factures, prescriptions) sont visibles par tous les membres de l'équipe en temps réel.
+
+Pour peupler la base avec des comptes de démo :
+
+```bash
+npx ts-node scripts/seed-demo.ts
+```
 
 ### Base de données locale (alternative)
 
